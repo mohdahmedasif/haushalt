@@ -1,10 +1,14 @@
 import { Select } from "antd";
 import type { Category, CategoryKind } from "../types";
 
+/** "Paid back" is set by linking a reimbursement, not picked by hand. */
+const LINK_ONLY = new Set(["loan_in"]);
+
 export function categoriesForAmount(categories: Category[], amount?: number): Category[] {
-  if (amount == null || amount === 0) return categories;
+  const pickable = categories.filter((c) => !LINK_ONLY.has(c.id));
+  if (amount == null || amount === 0) return pickable;
   const allowed = new Set<CategoryKind>(amount > 0 ? ["income", "transfer"] : ["expense", "transfer"]);
-  return categories.filter((c) => allowed.has(c.kind));
+  return pickable.filter((c) => allowed.has(c.kind));
 }
 
 export function CategorySelect({
@@ -14,7 +18,7 @@ export function CategorySelect({
   onChange,
   size = "middle",
   allowClear = false,
-  placeholder = "Uncategorized",
+  placeholder = "Pick a category",
 }: {
   value: string;
   categories: Category[];

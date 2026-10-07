@@ -3,6 +3,7 @@ import type {
   CashMovement,
   Category,
   CategoryRule,
+  GoldLot,
   ImportBatch,
   ImportPreviewRow,
   MonthSummary,
@@ -34,10 +35,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   summary: (month: string) => request<MonthSummary>(`/api/v1/summary?month=${month}`),
   categories: () => request<Category[]>("/api/v1/categories"),
-  patchCategory: (id: string, budget: number, name?: string) =>
+  patchCategory: (id: string, patch: { budget?: number; name?: string; showInReport?: boolean }) =>
     request<Category>(`/api/v1/categories/${id}`, {
       method: "PATCH",
-      body: JSON.stringify({ budget, name }),
+      body: JSON.stringify(patch),
+    }),
+  deleteCategory: (id: string, moveTo?: string) =>
+    request<{ ok: boolean; categories: Category[] }>(`/api/v1/categories/${id}`, {
+      method: "DELETE",
+      body: JSON.stringify(moveTo ? { moveTo } : {}),
     }),
   addCategory: (body: { name: string; kind: "expense" | "income"; budget?: number }) =>
     request<Category>("/api/v1/categories", {
@@ -73,12 +79,11 @@ export const api = {
   imports: () => request<ImportBatch[]>("/api/v1/imports"),
   cash: () => request<{ balance: number; movements: CashMovement[] }>("/api/v1/cash"),
   addCash: (body: {
-    type: "in" | "out" | "opening";
+    type: "in" | "out" | "bank" | "opening";
     amount: number;
     date: string;
     categoryId?: string;
     note?: string;
-    bookRemainder?: boolean;
     loanPersonId?: string;
     loanDirection?: "lent" | "repaid";
   }) =>
@@ -86,9 +91,30 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  patchCash: (
+    id: string,
+    body: { amount?: number; date?: string; categoryId?: string | null; note?: string },
+  ) =>
+    request<{ movement: CashMovement; balance: number }>(`/api/v1/cash/movements/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deleteCash: (id: string) =>
+    request<{ ok: boolean; balance: number }>(`/api/v1/cash/movements/${id}`, { method: "DELETE" }),
+  gold: () => request<{ lots: GoldLot[]; totals: { grams: number; paid: number; avgPerGram: number; lots: number } }>("/api/v1/gold"),
+  addGold: (body: Omit<GoldLot, "id" | "createdAt" | "pricePerGram">) =>
+    request<GoldLot>("/api/v1/gold", { method: "POST", body: JSON.stringify(body) }),
+  patchGold: (id: string, body: Partial<GoldLot>) =>
+    request<GoldLot>(`/api/v1/gold/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteGold: (id: string) => request<{ ok: boolean }>(`/api/v1/gold/${id}`, { method: "DELETE" }),
   exportAll: () => request<unknown>("/api/v1/export"),
   account: () => request<AccountState>("/api/v1/account"),
-  setup: (body: { openingBalance: number; openingBalanceDate: string; onboarded?: boolean }) =>
+  setup: (body: {
+    openingBalance: number;
+    openingBalanceDate: string;
+    openingCash?: number;
+    onboarded?: boolean;
+  }) =>
     request<AccountState>("/api/v1/setup", {
       method: "POST",
       body: JSON.stringify(body),

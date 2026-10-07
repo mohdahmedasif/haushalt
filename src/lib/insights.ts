@@ -405,13 +405,13 @@ function buildNotes(input: {
     });
   }
 
-  const zakat = round2(sumAbs(input.inYear.filter((tx) => categoryHits(tx, "zakat") && tx.amount < 0)));
-  if (zakat > 0) {
+  const donations = round2(sumAbs(input.inYear.filter((tx) => categoryHits(tx, "donation") && tx.amount < 0)));
+  if (donations > 0) {
     notes.push({
-      id: "zakat",
+      id: "donation",
       severity: "info",
-      title: `Zakat ${fmt(zakat)} this year`,
-      body: "Tracked as its own category. That is not German Kirchensteuer. Ask a Steuerberater before treating any of it as Sonderausgaben.",
+      title: `Donations ${fmt(donations)} this year`,
+      body: "Ask a Steuerberater before treating any of this as Sonderausgaben.",
     });
   }
 

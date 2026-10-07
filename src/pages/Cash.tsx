@@ -1,14 +1,16 @@
 import { useMemo, useState } from "react";
-import { Alert, Button, Col, DatePicker, Form, Input, InputNumber, Row, Select, Space, Switch, Typography } from "antd";
+import { Alert, Button, DatePicker, Drawer, Form, Input, InputNumber, Segmented, Space, Typography } from "antd";
 import dayjs from "dayjs";
 import { formatEur } from "../lib/money";
 import { formatDay, formatMonth } from "../lib/dates";
 import { PageHeader } from "../ui/PageHeader";
 import { Money } from "../ui/Money";
+import { StatCard } from "../ui/StatCard";
 import { SectionCard } from "../ui/SectionCard";
 import { EmptyState } from "../ui/EmptyState";
 import { CategoryTag } from "../ui/CategoryTag";
 import { CategorySelect } from "../ui/CategorySelect";
+import { CashBookingForm, cashMovementEditable } from "../ui/CashBookingForm";
 import type { CashMovement, Category } from "../types";
 
 const LUMP_PRESETS = [400, 500, 800];
@@ -18,37 +20,42 @@ export function CashPage({
   movements,
   categories,
   onAdd,
+  onPatch,
+  onDelete,
 }: {
   balance: number;
   movements: CashMovement[];
   categories: Category[];
   onAdd: (body: {
-    type: "in" | "out" | "opening";
+    type: "in" | "out" | "bank";
     amount: number;
     date: string;
     categoryId?: string;
     note?: string;
-    bookRemainder?: boolean;
   }) => Promise<void>;
+  onPatch?: (id: string, body: { amount: number; date: string; categoryId: string; note: string }) => Promise<void>;
+  onDelete?: (id: string) => Promise<void>;
 }) {
   const expenses = categories.filter((c) => c.kind === "expense");
-  const [type, setType] = useState<"out" | "in" | "opening">("out");
+  const inCategories = categories.filter((c) => c.kind === "income" || c.id === "loan_in");
+  const [type, setType] = useState<"out" | "in" | "bank">("out");
   const [amount, setAmount] = useState(Math.min(400, balance || 400));
   const [date, setDate] = useState(dayjs());
   const [categoryId, setCategoryId] = useState("groceries");
   const [note, setNote] = useState("Cash · Groceries");
-  const [bookRemainder, setBookRemainder] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [editId, setEditId] = useState<string | null>(null);
+  const editing = movements.find((m) => m.id === editId) ?? null;
 
   const fills = movements.filter((m) => m.type === "atm_in" || m.type === "cash_in" || m.type === "opening");
-  const outs = movements.filter((m) => m.type === "cash_out");
+  const outs = movements.filter((m) => m.type === "cash_out" || m.type === "bank_out");
   const fillMonths = new Set(fills.filter((m) => m.type === "atm_in").map((m) => m.month));
-  const lumpMonths = new Set(outs.map((m) => m.month));
+  const lumpMonths = new Set(outs.filter((m) => m.type === "cash_out").map((m) => m.month));
   const staleWallet = balance >= 1500 && lumpMonths.size + 1 < fillMonths.size;
   const timeline = useMemo(() => groupByMonth(movements), [movements]);
-  const remainder = Math.round((balance - amount) * 100) / 100;
-  const showRemainder = type === "out" && balance > 0 && amount > 0 && remainder > 0.005;
+  const inTotal = fills.reduce((sum, m) => sum + m.amount, 0);
+  const outTotal = outs.reduce((sum, m) => sum + m.amount, 0);
 
   async function submit() {
     setBusy(true);
@@ -58,9 +65,8 @@ export function CashPage({
         type,
         amount,
         date: date.format("YYYY-MM-DD"),
-        categoryId: type === "out" ? categoryId : undefined,
+        categoryId: type === "bank" ? undefined : categoryId,
         note,
-        bookRemainder: type === "out" && showRemainder ? bookRemainder : false,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not save");
@@ -71,9 +77,8 @@ export function CashPage({
 
   return (
     <>
-      <PageHeader title="Cash wallet">
-        ATM withdrawals fill the wallet. When cash is spent, book it here — classify what you know, and leave the rest
-        as Cash (to classify) so it still counts as expense until you reclass.
+      <PageHeader title="Cash">
+        ATM fills the wallet. Spend and Received book against categories. To bank moves cash back onto the Girokonto.
       </PageHeader>
 
       {staleWallet && (
@@ -81,109 +86,29 @@ export function CashPage({
           type="warning"
           showIcon
           style={{ marginBottom: 16 }}
-          message="Wallet still includes old ATM cash"
-          description={`${formatEur(balance)} from ${fillMonths.size} ATM months, but cash spend is only recorded for ${lumpMonths.size} month${lumpMonths.size === 1 ? "" : "s"}. If that cash is already spent, book it below.`}
+          message="Old ATM cash may still be in the wallet"
+          description={`${formatEur(balance)} came from ${fillMonths.size} ATM month${fillMonths.size === 1 ? "" : "s"}, but spend is only booked for ${lumpMonths.size}. If that cash is already gone, record it below.`}
         />
       )}
 
-      <Row gutter={[16, 16]}>
-        <Col xs={24} lg={10}>
-          <SectionCard>
-            <div className="stat-label">Cash on hand</div>
-            <div className="stat-value hero">
-              <Money value={balance} />
-            </div>
-            <div className="stat-caption">Opening + ATM + cash received − cash spend</div>
-          </SectionCard>
-          <SectionCard title="How this works">
-            <Typography.Paragraph type="secondary" style={{ margin: 0 }}>
-              Example: ATM 1.500 €, you know 500 € was travel — book 500 € as Traveling and leave the rest as Cash (to
-              classify). Budgets see the full 1.500 € expense; later open the cash booking and reclass the remainder.
-            </Typography.Paragraph>
-          </SectionCard>
-        </Col>
-        <Col xs={24} lg={14}>
-          <SectionCard title="Add movement">
-            <Form layout="vertical" onFinish={() => void submit()}>
-              <Form.Item label="Movement">
-                <Select
-                  value={type}
-                  onChange={setType}
-                  options={[
-                    { value: "out", label: "Cash spend" },
-                    { value: "in", label: "Cash in (received in cash)" },
-                    { value: "opening", label: "Opening balance" },
-                  ]}
-                />
-              </Form.Item>
-              {type === "out" && (
-                <Form.Item label="Category">
-                  <CategorySelect
-                    value={categoryId}
-                    categories={expenses}
-                    onChange={(id) => {
-                      const next = id || "groceries";
-                      setCategoryId(next);
-                      const name = expenses.find((c) => c.id === next)?.name;
-                      if (!note || note.startsWith("Cash · ")) setNote(name ? `Cash · ${name}` : "");
-                    }}
-                  />
-                </Form.Item>
-              )}
-              <Form.Item label="Amount €">
-                <InputNumber value={amount} onChange={(v) => setAmount(Number(v || 0))} min={0} style={{ width: "100%" }} />
-                {type === "out" && (
-                  <Space style={{ marginTop: 8 }} wrap>
-                    {LUMP_PRESETS.map((n) => (
-                      <Button
-                        key={n}
-                        size="small"
-                        type={amount === n ? "primary" : "default"}
-                        onClick={() => setAmount(n)}
-                      >
-                        {n}
-                      </Button>
-                    ))}
-                    {balance > 0 && (
-                      <Button size="small" type={amount === balance ? "primary" : "default"} onClick={() => setAmount(balance)}>
-                        All {formatEur(balance)}
-                      </Button>
-                    )}
-                  </Space>
-                )}
-              </Form.Item>
-              {showRemainder && (
-                <Form.Item>
-                  <label className="cash-remainder">
-                    <Switch size="small" checked={bookRemainder} onChange={setBookRemainder} />
-                    <span>
-                      Also book remaining {formatEur(remainder)} as{" "}
-                      <strong>Cash (to classify)</strong>
-                      {bookRemainder ? ` · total spend ${formatEur(balance)}` : ""}
-                    </span>
-                  </label>
-                </Form.Item>
-              )}
-              <Form.Item label="Date">
-                <DatePicker value={date} onChange={(v) => v && setDate(v)} allowClear={false} style={{ width: "100%" }} />
-              </Form.Item>
-              <Form.Item label="Note">
-                <Input value={note} onChange={(e) => setNote(e.target.value)} />
-              </Form.Item>
-              {error && <Alert type="error" message={error} style={{ marginBottom: 12 }} />}
-              <Button type="primary" htmlType="submit" loading={busy}>
-                {type === "out" && showRemainder && bookRemainder
-                  ? `Book ${formatEur(balance)} spend`
-                  : "Add to wallet"}
-              </Button>
-            </Form>
-          </SectionCard>
-        </Col>
-      </Row>
+      <div className="page-hero cols-3">
+        <div className="hero-panel">
+          <div className="stat-label">Cash on hand</div>
+          <div className="stat-value hero">
+            <Money value={balance} />
+          </div>
+          <div className="stat-caption">Opening + ATM + received − spend</div>
+        </div>
+        <StatCard label="Into wallet" value={<Money value={inTotal} absolute />} caption="ATM, received, and opening" />
+        <StatCard label="Out of wallet" value={<Money value={-outTotal} />} caption="Spend and deposits to bank" />
+      </div>
 
-      <SectionCard title="Timeline">
+      <SectionCard title="History">
         {timeline.length === 0 ? (
-          <EmptyState title="No movements yet" body="Import a CSV with BARGELDAUSZAHLUNG, or record cash spend." />
+          <EmptyState
+            title="No cash movements yet"
+            body="Import a CSV with ATM withdrawals, or book spend and cash received below."
+          />
         ) : (
           timeline.map(([monthKey, items]) => {
             const total = items.reduce((sum, m) => sum + (m.type === "cash_out" ? -m.amount : m.amount), 0);
@@ -197,8 +122,25 @@ export function CashPage({
                 </div>
                 {items.map((m) => {
                   const cat = categories.find((c) => c.id === m.categoryId);
+                  const canEdit = cashMovementEditable(m) && onPatch;
                   return (
-                    <div className="cash-line" key={m.id}>
+                    <div
+                      className={`cash-line${canEdit ? " cash-line-editable" : ""}`}
+                      key={m.id}
+                      role={canEdit ? "button" : undefined}
+                      tabIndex={canEdit ? 0 : undefined}
+                      onClick={canEdit ? () => setEditId(m.id) : undefined}
+                      onKeyDown={
+                        canEdit
+                          ? (e) => {
+                              if (e.key === "Enter" || e.key === " ") {
+                                e.preventDefault();
+                                setEditId(m.id);
+                              }
+                            }
+                          : undefined
+                      }
+                    >
                       <Typography.Text type="secondary">{formatDay(m.date)}</Typography.Text>
                       <div>
                         <div>{m.note || labelType(m.type)}</div>
@@ -207,7 +149,7 @@ export function CashPage({
                           {cat ? <CategoryTag name={cat.name} color={cat.color} /> : null}
                         </Space>
                       </div>
-                      <Money value={m.type === "cash_out" ? -m.amount : m.amount} />
+                      <Money value={m.type === "cash_out" || m.type === "bank_out" ? -m.amount : m.amount} />
                     </div>
                   );
                 })}
@@ -215,6 +157,143 @@ export function CashPage({
             );
           })
         )}
+      </SectionCard>
+
+      <Drawer
+        title={
+          <span className="booking-drawer-title">
+            {editing
+              ? editing.type === "cash_out"
+                ? "Edit spend"
+                : editing.type === "bank_out"
+                  ? "Edit deposit"
+                  : "Edit received"
+              : "Edit"}
+          </span>
+        }
+        open={Boolean(editing)}
+        onClose={() => setEditId(null)}
+        width={440}
+        classNames={{ body: "booking-drawer-body", header: "booking-drawer-header" }}
+        destroyOnHidden
+      >
+        {editing && onPatch ? (
+          <CashBookingForm
+            key={editing.id}
+            movement={editing}
+            categories={categories}
+            onSave={async (body) => {
+              await onPatch(editing.id, body);
+              setEditId(null);
+            }}
+            onDelete={
+              onDelete
+                ? async () => {
+                    await onDelete(editing.id);
+                    setEditId(null);
+                  }
+                : undefined
+            }
+            onCancel={() => setEditId(null)}
+          />
+        ) : null}
+      </Drawer>
+
+      <SectionCard title="Add cash">
+        <Form className="compact-form" layout="vertical" onFinish={() => void submit()}>
+          <Form.Item label="Type" style={{ marginBottom: 16 }}>
+            <Segmented<"out" | "in" | "bank">
+              value={type}
+              block
+              onChange={(next) => {
+                setType(next);
+                if (next === "out") {
+                  setCategoryId("groceries");
+                  setNote((current) => (!current || current.startsWith("Cash") ? "Cash · Groceries" : current));
+                } else if (next === "in") {
+                  setCategoryId("other_income");
+                  setNote((current) => (!current || current.startsWith("Cash ·") ? "Cash received" : current));
+                } else {
+                  setNote((current) => (!current || current.startsWith("Cash") ? "Cash to bank" : current));
+                  if (balance > 0) setAmount(Math.min(amount, balance) || balance);
+                }
+              }}
+              options={[
+                { value: "out", label: "Spend" },
+                { value: "in", label: "Received" },
+                { value: "bank", label: "To bank" },
+              ]}
+            />
+          </Form.Item>
+          <div className="compact-form-grid">
+            <Form.Item label="Amount">
+              <InputNumber value={amount} onChange={(v) => setAmount(Number(v || 0))} min={0} addonAfter="€" style={{ width: "100%" }} />
+            </Form.Item>
+            {type === "out" ? (
+              <Form.Item label="Category">
+                <CategorySelect
+                  value={categoryId}
+                  categories={expenses}
+                  onChange={(id) => {
+                    const next = id || "groceries";
+                    setCategoryId(next);
+                    const name = expenses.find((c) => c.id === next)?.name;
+                    if (!note || note.startsWith("Cash · ")) setNote(name ? `Cash · ${name}` : "");
+                  }}
+                />
+              </Form.Item>
+            ) : type === "in" ? (
+              <Form.Item label="Source">
+                <CategorySelect
+                  value={categoryId}
+                  categories={inCategories}
+                  amount={1}
+                  placeholder="Other income"
+                  onChange={(id) => {
+                    const next = id || "other_income";
+                    setCategoryId(next);
+                    const name = inCategories.find((c) => c.id === next)?.name;
+                    if (!note || note === "Cash received" || note.startsWith("Cash received ·")) {
+                      setNote(name ? `Cash received · ${name}` : "Cash received");
+                    }
+                  }}
+                />
+              </Form.Item>
+            ) : null}
+            <Form.Item label="Date">
+              <DatePicker value={date} onChange={(v) => v && setDate(v)} allowClear={false} style={{ width: "100%" }} />
+            </Form.Item>
+            <Form.Item label="Note">
+              <Input
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                placeholder={type === "in" ? "Who paid you, or why" : type === "bank" ? "Which ATM or branch" : "What it was for"}
+              />
+            </Form.Item>
+          </div>
+          {(type === "out" || type === "bank") && (
+            <Space style={{ marginTop: 12 }} wrap>
+              {type === "out"
+                ? LUMP_PRESETS.map((n) => (
+                    <Button key={n} size="small" type={amount === n ? "primary" : "default"} onClick={() => setAmount(n)}>
+                      {n}
+                    </Button>
+                  ))
+                : null}
+              {balance > 0 && (
+                <Button size="small" type={amount === balance ? "primary" : "default"} onClick={() => setAmount(balance)}>
+                  All {formatEur(balance)}
+                </Button>
+              )}
+            </Space>
+          )}
+          {error && <Alert type="error" message={error} style={{ marginTop: 12 }} />}
+          <div className="compact-form-foot">
+            <Button type="primary" htmlType="submit" loading={busy}>
+              {type === "in" ? "Save received cash" : type === "bank" ? "Save deposit" : "Save spend"}
+            </Button>
+          </div>
+        </Form>
       </SectionCard>
     </>
   );
@@ -235,11 +314,13 @@ function groupByMonth(rows: CashMovement[]): [string, CashMovement[]][] {
 function labelType(type: CashMovement["type"]): string {
   switch (type) {
     case "atm_in":
-      return "ATM fill";
+      return "ATM";
     case "cash_in":
-      return "Cash in";
+      return "Received";
     case "cash_out":
       return "Spend";
+    case "bank_out":
+      return "To bank";
     case "opening":
       return "Opening";
   }

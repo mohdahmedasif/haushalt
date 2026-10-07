@@ -3,20 +3,40 @@ import { useSearchParams } from "react-router-dom";
 import { Button, Drawer, Flex, Input, InputNumber, Segmented, Select, Switch, Table } from "antd";
 import { PageHeader } from "../ui/PageHeader";
 import { Money } from "../ui/Money";
-import { FilterBar } from "../ui/FilterBar";
 import { CategoryTag } from "../ui/CategoryTag";
 import { CategorySelect, categoriesForAmount } from "../ui/CategorySelect";
+import { StatCard } from "../ui/StatCard";
 import { SectionCard } from "../ui/SectionCard";
 import { EmptyState } from "../ui/EmptyState";
 import { LoanPanel } from "../ui/LoanPanel";
 import { formatDay, formatDayShort, formatMonth, latestBookedMonth } from "../lib/dates";
 import { accountFeeMonth } from "../lib/categorize";
 import { runningBalanceById } from "../lib/runningBalance";
-import { categoryPatch, isOpenLoan, isWaitingToAttach, loanOriginStatus, splitLoanPatch } from "../lib/lending";
+import {
+  categoryPatch,
+  isLoanOrigin,
+  isOpenLoan,
+  isWaitingToAttach,
+  loanOriginStatus,
+  originKind,
+  splitLoanPatch,
+  type OriginKind,
+} from "../lib/lending";
 import { amountMatchesFilter, formatEur, tryParseAmount } from "../lib/money";
-import type { Category, Person, Transaction } from "../types";
+import { CashBookingForm, cashMovementEditable } from "../ui/CashBookingForm";
+import type { CashMovement, Category, Person, Transaction } from "../types";
 
-type FilterMode = "all" | "uncat" | "in" | "out" | "open";
+type FilterMode = "all" | "uncat" | "in" | "out" | "lent" | "reimburse";
+
+const PENDING_KIND: Partial<Record<FilterMode, OriginKind>> = { lent: "lent", reimburse: "back" };
+
+function isPendingMode(mode: FilterMode): mode is "lent" | "reimburse" {
+  return mode === "lent" || mode === "reimburse";
+}
+
+function isPendingOfKind(tx: Transaction, ledger: Transaction[], people: Person[], kind: OriginKind): boolean {
+  return isOpenLoan(tx, ledger, kind) || isWaitingToAttach(tx, ledger, people, kind);
+}
 
 function bookedInMonth(tx: Transaction, month: string): boolean {
   const feeMonth = accountFeeMonth(tx.valueDate || tx.bookingDate, tx.bookingText);
@@ -38,16 +58,22 @@ export function TransactionsPage({
   transactions,
   categories,
   people = [],
+  cashMovements = [],
   openingBalance = 0,
   onPatch,
+  onPatchCash,
+  onDeleteCash,
   onMonthChange,
 }: {
   month: string;
   transactions: Transaction[];
   categories: Category[];
   people?: Person[];
+  cashMovements?: CashMovement[];
   openingBalance?: number;
   onPatch: (id: string, patch: Partial<Transaction>) => Promise<void>;
+  onPatchCash?: (id: string, body: { amount: number; date: string; categoryId: string; note: string }) => Promise<void>;
+  onDeleteCash?: (id: string) => Promise<void>;
   onMonthChange?: (month: string) => void;
 }) {
   const [params, setParams] = useSearchParams();
@@ -55,9 +81,11 @@ export function TransactionsPage({
   const mode: FilterMode =
     params.get("uncat") === "1"
       ? "uncat"
-      : kind === "in" || kind === "out" || kind === "open"
-        ? kind
-        : "all";
+      : kind === "open"
+        ? "lent"
+        : kind === "in" || kind === "out" || kind === "lent" || kind === "reimburse"
+          ? kind
+          : "all";
   const categoryFilter = params.get("category") ?? "";
   const [search, setSearch] = useState(params.get("q") ?? "");
   const [amountMinText, setAmountMinText] = useState(params.get("amin") ?? "");
@@ -73,7 +101,7 @@ export function TransactionsPage({
     if (nextMode === "uncat") {
       nextParams.set("uncat", "1");
       nextParams.delete("kind");
-    } else if (nextMode === "in" || nextMode === "out" || nextMode === "open") {
+    } else if (nextMode === "in" || nextMode === "out" || isPendingMode(nextMode)) {
       nextParams.set("kind", nextMode);
       nextParams.delete("uncat");
     } else {
@@ -97,12 +125,10 @@ export function TransactionsPage({
   );
 
   const rows = useMemo(() => {
-    const base =
-      mode === "open"
-        ? transactions.filter(
-            (tx) => isOpenLoan(tx, transactions) || isWaitingToAttach(tx, transactions, people),
-          )
-        : monthRows;
+    const pendingKind = PENDING_KIND[mode];
+    const base = pendingKind
+      ? transactions.filter((tx) => isPendingOfKind(tx, transactions, people, pendingKind))
+      : monthRows;
     return base
       .filter((tx) => {
         if (hideExcluded && tx.excluded) return false;
@@ -129,9 +155,8 @@ export function TransactionsPage({
 
   const open = rows.find((tx) => tx.id === openId) ?? transactions.find((tx) => tx.id === openId) ?? null;
   const uncatCount = monthRows.filter((tx) => !tx.categoryId && tx.splits.length === 0 && !tx.excluded).length;
-  const openLoanCount = transactions.filter(
-    (tx) => isOpenLoan(tx, transactions) || isWaitingToAttach(tx, transactions, people),
-  ).length;
+  const lentCount = transactions.filter((tx) => isPendingOfKind(tx, transactions, people, "lent")).length;
+  const reimburseCount = transactions.filter((tx) => isPendingOfKind(tx, transactions, people, "back")).length;
   const shownIn = rows.filter((tx) => !tx.excluded && tx.amount > 0).reduce((sum, tx) => sum + tx.amount, 0);
   const shownOut = rows.filter((tx) => !tx.excluded && tx.amount < 0).reduce((sum, tx) => sum + tx.amount, 0);
   const jumpMonth = monthRows.length === 0 ? latestBookedMonth(transactions) : null;
@@ -158,87 +183,74 @@ export function TransactionsPage({
 
   return (
     <>
-      <PageHeader title="Transactions">
-        {mode === "open"
-          ? `Still open · ${rows.length} across all months`
-          : `${formatMonth(month)} · ${monthRows.length} bookings${
-              uncatCount ? ` · ${uncatCount} still need a category` : " · all tagged"
+      <PageHeader title="Bookings">
+        {mode === "lent"
+          ? `Lent to people · ${rows.length} still to be paid back or to link · across every month`
+          : mode === "reimburse"
+            ? `To be reimbursed · ${rows.length} still open or to link · across every month`
+            : `${formatMonth(month)} · ${monthRows.length} booking${monthRows.length === 1 ? "" : "s"}${
+              uncatCount ? ` · ${uncatCount} need a category` : " · all tagged"
             }`}
       </PageHeader>
 
-      <div className="tx-summary">
-        <div>
-          <span className="stat-label">Shown</span>
-          <strong>{rows.length}</strong>
-        </div>
-        <div>
-          <span className="stat-label">In</span>
-          <strong>
-            <Money value={shownIn} />
-          </strong>
-        </div>
-        <div>
-          <span className="stat-label">Out</span>
-          <strong>
-            <Money value={shownOut} />
-          </strong>
-        </div>
-        <div>
-          <span className="stat-label">Net</span>
-          <strong>
-            <Money value={shownIn + shownOut} />
-          </strong>
-        </div>
+      <div className="stats-grid">
+        <StatCard label="Shown" value={rows.length} caption="In this filter" />
+        <StatCard label="In" value={<Money value={shownIn} />} />
+        <StatCard label="Out" value={<Money value={shownOut} />} />
+        <StatCard label="Net" value={<Money value={shownIn + shownOut} />} />
       </div>
 
-      <FilterBar>
-        <Segmented<FilterMode>
-          value={mode}
-          onChange={(value) => setFilter({ mode: value })}
-          options={[
-            { label: "All", value: "all" },
-            { label: uncatCount ? `Needs category (${uncatCount})` : "Needs category", value: "uncat" },
-            { label: openLoanCount ? `Still open (${openLoanCount})` : "Still open", value: "open" },
-            { label: "In", value: "in" },
-            { label: "Out", value: "out" },
-          ]}
-        />
-        <Input.Search
-          allowClear
-          placeholder="Search payee, purpose, IBAN"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          style={{ maxWidth: 280, minWidth: 200, flex: 1 }}
-        />
-        <Input
-          allowClear
-          value={amountMinText}
-          onChange={(e) => setAmountMinText(e.target.value)}
-          placeholder="Min €"
-          style={{ width: 100 }}
-        />
-        <Input
-          allowClear
-          value={amountMaxText}
-          onChange={(e) => setAmountMaxText(e.target.value)}
-          placeholder="Max €"
-          style={{ width: 100 }}
-        />
-        <Select
-          allowClear
-          placeholder="Any category"
-          value={categoryFilter || undefined}
-          onChange={(value) => setFilter({ category: value ?? "" })}
-          style={{ minWidth: 180 }}
-          options={categories.map((c) => ({ value: c.id, label: c.name }))}
-        />
-        <label className="tx-hide-excluded">
-          <Switch size="small" checked={hideExcluded} onChange={setHideExcluded} />
-          Hide excluded
-        </label>
-      </FilterBar>
-
       <SectionCard padded={false}>
+        <div className="filter-bar filter-bar-inset">
+          <Segmented<FilterMode>
+            value={mode}
+            onChange={(value) => setFilter({ mode: value })}
+            options={[
+              { label: "All", value: "all" },
+              { label: uncatCount ? `Untagged (${uncatCount})` : "Untagged", value: "uncat" },
+              { label: lentCount ? `Lent (${lentCount})` : "Lent", value: "lent" },
+              {
+                label: reimburseCount ? `To be reimbursed (${reimburseCount})` : "To be reimbursed",
+                value: "reimburse",
+              },
+              { label: "In", value: "in" },
+              { label: "Out", value: "out" },
+            ]}
+          />
+          <Input.Search
+            allowClear
+            placeholder="Search payee, purpose, IBAN"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            style={{ maxWidth: 280, minWidth: 200, flex: 1 }}
+          />
+          <Input
+            allowClear
+            value={amountMinText}
+            onChange={(e) => setAmountMinText(e.target.value)}
+            placeholder="Min €"
+            style={{ width: 100 }}
+          />
+          <Input
+            allowClear
+            value={amountMaxText}
+            onChange={(e) => setAmountMaxText(e.target.value)}
+            placeholder="Max €"
+            style={{ width: 100 }}
+          />
+          <Select
+            allowClear
+            placeholder="Any category"
+            value={categoryFilter || undefined}
+            onChange={(value) => setFilter({ category: value ?? "" })}
+            style={{ minWidth: 180 }}
+            options={categories.map((c) => ({ value: c.id, label: c.name }))}
+          />
+          <label className="tx-hide-excluded">
+            <Switch size="small" checked={hideExcluded} onChange={setHideExcluded} />
+            Hide excluded
+          </label>
+        </div>
         <Table
           className="tx-table"
           size="middle"
@@ -257,28 +269,32 @@ export function TransactionsPage({
                 title={
                   mode === "uncat"
                     ? "Nothing left to tag"
-                    : mode === "open"
-                      ? "Nothing still open"
-                      : jumpMonth
+                    : mode === "lent"
+                      ? "Nobody owes you money"
+                      : mode === "reimburse"
+                        ? "Nothing waiting to be reimbursed"
+                        : jumpMonth
                         ? `No bookings in ${formatMonth(month)}`
-                        : "Nothing in this view"
+                        : "Nothing matches"
                 }
                 body={
-                  mode === "open"
-                    ? "Mark a booking as Money Lent and it stays here until return bookings are attached — across every month."
-                    : mode === "uncat"
+                  mode === "lent"
+                    ? "Tag money you give a person as Money Lent. It stays here until what they pay back is linked."
+                    : mode === "reimburse"
+                      ? "Turn on To be reimbursed on a booking (e.g. a team dinner your company pays back). It stays here until the reimbursement is linked."
+                      : mode === "uncat"
                       ? "Every booking this month already has a category. Switch to All to see them."
                       : jumpMonth
-                        ? `Your ledger has bookings in ${formatMonth(jumpMonth)}. Still-open money lent (${openLoanCount}) is counted across all months, not just this one.`
+                        ? `Your ledger has bookings in ${formatMonth(jumpMonth)}. Lent and To be reimbursed count across all months.`
                         : search || amountMin != null || amountMax != null
-                          ? "Try a shorter search, clear the amount filter, or clear the other filters."
-                          : "Import a CSV or pick another month."
+                          ? "Try a shorter search, or clear the amount and category filters."
+                          : "Import a CSV, or pick another month."
                 }
               />
             ),
           }}
           footer={
-            mode === "open"
+            isPendingMode(mode)
               ? undefined
               : jumpMonth && onMonthChange
                 ? () => (
@@ -324,7 +340,7 @@ export function TransactionsPage({
               title: "Payee",
               className: "tx-col-payee",
               render: (_, tx) => {
-                const payee = tx.counterparty || tx.bookingText || "Unknown payee";
+                const payee = tx.counterparty || tx.bookingText || "Unknown";
                 const purpose =
                   tx.purpose && tx.purpose !== payee
                     ? tx.purpose
@@ -404,8 +420,21 @@ export function TransactionsPage({
             categories={categories}
             people={people}
             ledger={transactions}
+            cashMovement={cashMovements.find((m) => m.transactionId === open.id)}
             balance={balances.get(open.id)}
             onPatch={onPatch}
+            onPatchCash={onPatchCash}
+            onDeleteCash={
+              onDeleteCash
+                ? async () => {
+                    const movement = cashMovements.find((m) => m.transactionId === open.id);
+                    if (movement) {
+                      await onDeleteCash(movement.id);
+                      setOpenId(null);
+                    }
+                  }
+                : undefined
+            }
             onPrev={() => {
               const index = rows.findIndex((tx) => tx.id === open.id);
               if (index > 0) setOpenId(rows[index - 1].id);
@@ -431,21 +460,33 @@ function TxFlags({
   people: Person[];
 }) {
   const flags: { label: string; tone?: string }[] = [];
-  if (isOpenLoan(tx, ledger)) {
+  if (isLoanOrigin(tx)) {
     const status = loanOriginStatus(tx, ledger);
-    flags.push({
-      label: status.repaid > 0 ? `Still open · ${formatEur(status.outstanding)} left` : "Still open · waiting for return",
-      tone: "loan-open",
-    });
+    const lent = originKind(tx) === "lent";
+    const n = status.installments.length;
+    const payments = n ? ` · ${n} payment${n === 1 ? "" : "s"}` : "";
+    if (!status.settled) {
+      flags.push({
+        label: lent
+          ? `Lent · ${formatEur(status.outstanding)} open${payments}`
+          : n
+            ? `To be reimbursed · ${formatEur(status.repaid)} back${payments}`
+            : "To be reimbursed",
+        tone: "loan-open",
+      });
+    } else {
+      flags.push({
+        label: lent ? `Paid back${payments}` : `Reimbursed · ${formatEur(status.repaid)}${payments}`,
+        tone: "loan-ok",
+      });
+    }
   } else if (tx.loanOriginId) {
     const origin = ledger.find((row) => row.id === tx.loanOriginId);
-    const n = origin ? ledger.filter((row) => row.loanOriginId === origin.id).length : 1;
-    flags.push({
-      label: n > 1 ? `Return · installment of ${n}` : "Return attached",
-      tone: "loan-ok",
-    });
-  } else if (isWaitingToAttach(tx, ledger, people)) {
-    flags.push({ label: "Attach to money lent", tone: "loan-wait" });
+    flags.push({ label: origin && originKind(origin) === "lent" ? "Paid back" : "Reimbursed", tone: "loan-ok" });
+  } else if (isWaitingToAttach(tx, ledger, people, "lent")) {
+    flags.push({ label: "Paid back? Link it", tone: "loan-wait" });
+  } else if (isWaitingToAttach(tx, ledger, people, "back")) {
+    flags.push({ label: "Reimbursed? Link it", tone: "loan-wait" });
   }
   if (tx.splits.length) flags.push({ label: `Split · ${tx.splits.length}` });
   if (tx.spreadMonths > 1) flags.push({ label: `Spread ${tx.spreadMonths} mo` });
@@ -492,8 +533,11 @@ function BookingDetail({
   categories,
   people,
   ledger,
+  cashMovement,
   balance,
   onPatch,
+  onPatchCash,
+  onDeleteCash,
   onPrev,
   onNext,
 }: {
@@ -501,14 +545,19 @@ function BookingDetail({
   categories: Category[];
   people: Person[];
   ledger: Transaction[];
+  cashMovement?: CashMovement;
   balance?: number;
   onPatch: (id: string, patch: Partial<Transaction>) => Promise<void>;
+  onPatchCash?: (id: string, body: { amount: number; date: string; categoryId: string; note: string }) => Promise<void>;
+  onDeleteCash?: () => Promise<void>;
   onPrev: () => void;
   onNext: () => void;
 }) {
   const [notes, setNotes] = useState(tx.notes);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const purpose = tx.purpose && tx.purpose !== tx.counterparty ? tx.purpose : "";
+  const editableCash =
+    tx.source === "cash" && cashMovement && cashMovementEditable(cashMovement) && onPatchCash;
 
   return (
     <div className="booking-drawer">
@@ -546,20 +595,37 @@ function BookingDetail({
         </div>
       )}
 
-      <section className="booking-panel booking-classify">
-        <div className="booking-classify-head">
-          <label className="booking-label">Category</label>
-          {tx.splits.length > 0 ? (
-            <span className="booking-classify-note">Split · {tx.splits.length} parts</span>
-          ) : null}
-        </div>
+      {editableCash ? (
+        <section className="booking-panel">
+          <label className="booking-label">Cash booking</label>
+          <CashBookingForm
+            key={cashMovement.id}
+            movement={cashMovement}
+            categories={categories}
+            embedded
+            onSave={(body) => onPatchCash(cashMovement.id, body)}
+            onDelete={onDeleteCash}
+          />
+        </section>
+      ) : null}
 
-        <SplitEditor tx={tx} categories={categories} onPatch={onPatch} />
-      </section>
+      {!(editableCash && tx.splits.length === 0) ? (
+        <section className="booking-panel booking-classify">
+          <div className="booking-classify-head">
+            <label className="booking-label">Category</label>
+            {tx.splits.length > 0 ? (
+              <span className="booking-classify-note">Split · {tx.splits.length} parts</span>
+            ) : null}
+          </div>
 
-      <LoanPanel tx={tx} ledger={ledger} people={people} onPatch={onPatch} />
+          <SplitEditor tx={tx} categories={categories} onPatch={onPatch} />
+        </section>
+      ) : null}
+
+      <LoanPanel key={tx.id} tx={tx} ledger={ledger} people={people} onPatch={onPatch} />
 
       <section className="booking-panel">
+        <label className="booking-label">Options</label>
         <div className="booking-row">
           <span>Exclude from budget</span>
           <Switch checked={tx.excluded} onChange={(checked) => void onPatch(tx.id, { excluded: checked })} />
@@ -583,16 +649,20 @@ function BookingDetail({
           </div>
         </div>
 
-        <label className="booking-label">Notes</label>
-        <Input.TextArea
-          value={notes}
-          rows={2}
-          placeholder="Optional context"
-          onChange={(e) => setNotes(e.target.value)}
-          onBlur={() => {
-            if (notes !== tx.notes) void onPatch(tx.id, { notes });
-          }}
-        />
+        {!editableCash ? (
+          <>
+            <label className="booking-label">Notes</label>
+            <Input.TextArea
+              value={notes}
+              rows={2}
+              placeholder="Optional note"
+              onChange={(e) => setNotes(e.target.value)}
+              onBlur={() => {
+                if (notes !== tx.notes) void onPatch(tx.id, { notes });
+              }}
+            />
+          </>
+        ) : null}
       </section>
 
       <nav className="booking-nav">
@@ -640,17 +710,18 @@ function SplitEditor({
   const rest = roundMoney(total - enteredSum);
   const amounts = parsed.map((line) => (line.isLast ? rest : line.amount));
   const cats = lines.map((line) => line.categoryId);
-  const uniqueCats = new Set(cats.filter(Boolean));
+  const repeatableCount = cats.filter((id) => REPEATABLE_SPLIT_CATS.has(id)).length;
+  const uniqueCats = new Set(cats.filter((id) => id && !REPEATABLE_SPLIT_CATS.has(id)));
   const allPositive = amounts.every((amount) => amount > 0);
   const canSave =
     lines.length >= 2 &&
     allPositive &&
-    uniqueCats.size === lines.length &&
+    uniqueCats.size + repeatableCount === lines.length &&
     cats.every(Boolean) &&
     roundMoney(amounts.reduce((sum, n) => sum + n, 0)) === total;
 
   const hint = !canSave
-    ? splitHint({ lines, amounts, rest, total, uniqueCats: uniqueCats.size })
+    ? splitHint({ lines, amounts, rest, total, uniqueCats: uniqueCats.size + repeatableCount })
     : `${lines.length} parts · ${formatEur(total)}`;
 
   function updateLine(key: string, patch: Partial<SplitDraft>) {
@@ -733,7 +804,7 @@ function SplitEditor({
       {lines.map((line, index) => {
         const isLast = index === lines.length - 1;
         return (
-          <div className="split-row" key={line.key}>
+          <div className="split-line" key={line.key}>
             <Select
               showSearch
               optionFilterProp="label"
@@ -814,6 +885,9 @@ function formatAmountInput(value: number): string {
 
 type SplitDraft = { key: string; categoryId: string; amountText: string };
 
+/** One line per item that comes back (refund, employer, someone else) — may repeat in a split. */
+const REPEATABLE_SPLIT_CATS = new Set(["loan_out"]);
+
 function initialSplitDraft(tx: Transaction, splitCats: Category[]): SplitDraft[] {
   if (tx.splits.length >= 2) {
     return tx.splits.map((line, index) => ({
@@ -849,7 +923,7 @@ function splitHint({
   uniqueCats: number;
 }): string {
   if (lines.some((line) => !line.categoryId)) return "Pick a category for each part.";
-  if (uniqueCats < lines.length) return "Each part needs a different category.";
+  if (uniqueCats < lines.length) return "Each part needs a different category (Money Lent can repeat).";
   if (rest < -0.005) return `Parts add up to more than ${formatEur(total)}.`;
   if (amounts.slice(0, -1).some((amount) => amount <= 0)) {
     return "Enter amounts for every part except the last.";

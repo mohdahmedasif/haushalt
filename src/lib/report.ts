@@ -22,37 +22,6 @@ export interface YearSheet {
 
 const MONTH_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-/** Same order and rows as Monthly Expenditure 2026. Extra app-only cats stay off the grid. */
-const SHEET_EXPENSE_IDS = [
-  "rent",
-  "electricity",
-  "heating",
-  "mobile",
-  "internet",
-  "transport",
-  "radio",
-  "groceries",
-  "wifey",
-  "family",
-  "recreation",
-  "investment",
-  "travel",
-  "bank_fee",
-  "shopping",
-  "insurance",
-  "leisure",
-  "education",
-  "government",
-  "bill_settlement",
-  "taxation",
-  "miscellaneous",
-  "savings",
-  "gifts",
-  "zakat",
-];
-
-const SHEET_INCOME_IDS = ["salary", "tax_return", "deposit_refund"];
-
 export function buildYearSheet(
   year: number,
   transactions: Transaction[],
@@ -62,9 +31,9 @@ export function buildYearSheet(
   const headers = MONTH_SHORT.map((name) => `${name}-${String(year).slice(2)}`);
   const summaries = monthKeys.map((month) => summarizeMonth(month, transactions, categories));
 
-  const byId = new Map(categories.map((c) => [c.id, c]));
-  const expenses = SHEET_EXPENSE_IDS.map((id) => byId.get(id)).filter((c): c is Category => Boolean(c));
-  const incomes = SHEET_INCOME_IDS.map((id) => byId.get(id)).filter((c): c is Category => Boolean(c));
+  const onSheet = categories.filter((c) => c.showInReport);
+  const expenses = onSheet.filter((c) => c.kind === "expense").sort((a, b) => a.sort - b.sort);
+  const incomes = onSheet.filter((c) => c.kind === "income").sort((a, b) => a.sort - b.sort);
 
   const expenseRows = expenses.map((cat, i) =>
     categoryRow(cat, i + 1, "expense", summaries, (raw) => -raw),

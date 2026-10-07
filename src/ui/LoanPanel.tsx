@@ -1,18 +1,22 @@
 import { useMemo, useState } from "react";
-import { Button, Flex, Input, Select, Space, Typography } from "antd";
+import { Button, Select, Switch } from "antd";
 import { formatDayShort } from "../lib/dates";
 import {
+  acceptsLateReimbursement,
   attachReturnPatch,
   candidateReturnBookings,
   detachReturnPatch,
-  isLoanOrigin,
-  isWaitingToAttach,
   loanOriginStatus,
   openOriginsForAttach,
+  originKind,
+  originMatchesIncoming,
+  reimbursePatch,
+  type LoanOriginStatus,
 } from "../lib/lending";
-import { amountMatchesFilter, formatEur, tryParseAmount } from "../lib/money";
+import { formatEur } from "../lib/money";
 import type { Person, Transaction } from "../types";
-import { Money } from "./Money";
+
+type Patch = (id: string, patch: Partial<Transaction>) => Promise<void>;
 
 export function LoanPanel({
   tx,
@@ -23,165 +27,163 @@ export function LoanPanel({
   tx: Transaction;
   ledger: Transaction[];
   people: Person[];
-  onPatch: (id: string, patch: Partial<Transaction>) => Promise<void>;
+  onPatch: Patch;
 }) {
-  const origin = isLoanOrigin(tx);
-  const attachedOrigin = tx.loanOriginId ? ledger.find((row) => row.id === tx.loanOriginId) : null;
-  const openHits = tx.amount > 0 ? openOriginsForAttach(tx, people, ledger) : [];
-  const waiting = isWaitingToAttach(tx, ledger, people);
-
-  if (origin) {
-    return (
-      <div className="loan-panel">
-        <OriginLent tx={tx} ledger={ledger} onPatch={onPatch} />
-      </div>
-    );
-  }
-  if (attachedOrigin) {
-    return (
-      <div className="loan-panel">
-        <AttachedReturn tx={tx} origin={attachedOrigin} ledger={ledger} onPatch={onPatch} />
-      </div>
-    );
-  }
-  if (tx.amount > 0 && (waiting || openHits.length > 0 || tx.categoryId === "loan_in")) {
-    return (
-      <div className="loan-panel">
-        <AttachReturn tx={tx} openHits={openHits} onPatch={onPatch} />
-      </div>
-    );
+  if (tx.amount < 0) return <Reimbursable tx={tx} ledger={ledger} onPatch={onPatch} />;
+  const origin = tx.loanOriginId ? ledger.find((row) => row.id === tx.loanOriginId) : null;
+  if (origin) return <LinkedPayback tx={tx} origin={origin} ledger={ledger} onPatch={onPatch} />;
+  if (tx.amount > 0) {
+    const openHits = openOriginsForAttach(tx, people, ledger, undefined, true);
+    if (!openHits.length) return null;
+    return <LinkToOrigin tx={tx} openHits={openHits} onPatch={onPatch} />;
   }
   return null;
 }
 
-function OriginLent({
-  tx,
-  ledger,
-  onPatch,
-}: {
-  tx: Transaction;
-  ledger: Transaction[];
-  onPatch: (id: string, patch: Partial<Transaction>) => Promise<void>;
-}) {
+function Reimbursable({ tx, ledger, onPatch }: { tx: Transaction; ledger: Transaction[]; onPatch: Patch }) {
+  const total = Math.abs(tx.amount);
   const status = loanOriginStatus(tx, ledger);
-  const allCandidates = candidateReturnBookings(tx, ledger);
-  const [amountQuery, setAmountQuery] = useState(
-    status.outstanding > 0 ? String(status.outstanding).replace(".", ",") : "",
-  );
-  const amountFilter = tryParseAmount(amountQuery);
+  const isLoan = originKind(tx) === "lent";
+  const on = status.lent > 0;
+  const base = isLoan ? status.lent : total;
+  const percent = base > 0 ? Math.min(100, (status.repaid / base) * 100) : 0;
+  const full = status.repaid >= base - 0.004 && status.repaid > 0;
 
-  const candidates = useMemo(() => {
-    if (amountFilter != null) {
-      return allCandidates.filter((row) =>
-        amountMatchesFilter(row.amount, null, null, amountFilter),
-      );
-    }
-    if (status.outstanding > 0) {
-      return [...allCandidates].sort(
-        (a, b) =>
-          Math.abs(Math.abs(a.amount) - status.outstanding) -
-          Math.abs(Math.abs(b.amount) - status.outstanding),
-      );
-    }
-    return allCandidates;
-  }, [allCandidates, amountFilter, status.outstanding]);
-
-  const [returnId, setReturnId] = useState("");
-  const selectedId = candidates.some((row) => row.id === returnId)
-    ? returnId
-    : candidates[0]?.id ?? "";
+  const state = full ? "done" : status.settled ? "closed" : "open";
+  const pill = isLoan
+    ? full
+      ? "Fully paid back"
+      : `${formatEur(status.outstanding)} to go`
+    : full
+      ? "Fully reimbursed"
+      : status.settled
+        ? "Closed"
+        : "Open";
 
   return (
-    <Space direction="vertical" size="small" style={{ width: "100%" }}>
-      <Typography.Text strong>Money lent</Typography.Text>
-      <Typography.Text type="secondary">
-        Stays open until you attach return bookings. Returns can be one booking or several installments.
-      </Typography.Text>
-      <Flex justify="space-between">
-        <span>Lent</span>
-        <Money value={-status.lent} />
-      </Flex>
-      <Flex justify="space-between">
-        <span>Returned</span>
-        <Money value={status.repaid} />
-      </Flex>
-      <Flex justify="space-between">
-        <span>{status.settled ? "Settled" : "Still open"}</span>
-        <strong>
-          <Money value={status.settled ? 0 : -status.outstanding} />
-        </strong>
-      </Flex>
-
-      {status.installments.length > 0 && (
-        <div className="loan-installments">
-          <Typography.Text type="secondary">Attached returns</Typography.Text>
-          {status.installments.map((row, index) => (
-            <Flex key={row.id} justify="space-between" gap={8} align="center" style={{ marginTop: 6 }}>
-              <span>
-                {formatDayShort(row.valueDate || row.bookingDate)} · {row.counterparty || "Incoming"}
-                {status.installments.length > 1 ? ` · ${index + 1}/${status.installments.length}` : ""}
-              </span>
-              <Flex gap={8} align="center">
-                <Money value={row.amount} />
-                <Button type="link" size="small" onClick={() => void onPatch(row.id, detachReturnPatch(row))}>
-                  Detach
-                </Button>
-              </Flex>
-            </Flex>
-          ))}
-        </div>
-      )}
-
-      {!status.settled && (
-        <div style={{ marginTop: 4 }}>
-          <Typography.Text type="secondary">Attach a return booking</Typography.Text>
-          <Input
-            allowClear
-            value={amountQuery}
-            onChange={(e) => setAmountQuery(e.target.value)}
-            placeholder={`Amount · ${formatEur(status.outstanding)} still open`}
-            style={{ marginTop: 6 }}
-            addonAfter="€"
+    <section className="booking-panel mb-panel">
+      <div className="mb-head">
+        <span className="booking-label">{isLoan ? "Lent" : "To be reimbursed"}</span>
+        {!isLoan && (
+          <Switch
+            size="small"
+            checked={on}
+            onChange={(checked) => void onPatch(tx.id, reimbursePatch(checked ? total : 0))}
           />
-          {allCandidates.length === 0 ? (
-            <Typography.Text type="secondary" style={{ display: "block", marginTop: 6 }}>
-              No unattached incoming bookings after this date yet.
-            </Typography.Text>
-          ) : candidates.length === 0 ? (
-            <Typography.Text type="secondary" style={{ display: "block", marginTop: 6 }}>
-              No returns match that amount. Clear the amount filter to see all.
-            </Typography.Text>
-          ) : (
-            <>
-              <Select
-                showSearch
-                optionFilterProp="label"
-                value={selectedId || undefined}
-                onChange={setReturnId}
-                style={{ width: "100%", marginTop: 6 }}
-                placeholder="Pick the return booking"
-                options={candidates.map((row) => ({
-                  value: row.id,
-                  label: `${formatDayShort(row.valueDate || row.bookingDate)} · ${row.counterparty || "Incoming"} · ${formatEur(row.amount)}`,
-                }))}
-              />
-              <Button
-                type="primary"
-                style={{ marginTop: 8 }}
-                disabled={!selectedId}
-                onClick={() => void onPatch(selectedId, attachReturnPatch(tx))}
-              >
-                Attach return
-              </Button>
-            </>
+        )}
+      </div>
+
+      {on && (
+        <>
+          <div className="mb-summary">
+            <div className="mb-figures">
+              <span className="mb-back money">{formatEur(status.repaid)}</span>
+              <span className="mb-of">
+                of {formatEur(base)} {isLoan ? "paid back" : "back"}
+              </span>
+            </div>
+            <div className="mb-bar">
+              <span style={{ width: `${percent}%` }} />
+            </div>
+            <div className="mb-status">
+              <span className={`mb-pill ${state}`}>{pill}</span>
+              {!isLoan && status.settled && !full && (
+                <span className="mb-note">
+                  You paid <span className="money">{formatEur(total - status.repaid)}</span>
+                </span>
+              )}
+              <span className="mb-spacer" />
+              {!isLoan && !status.settled && status.repaid > 0 && (
+                <Button size="small" onClick={() => void onPatch(tx.id, reimbursePatch(status.repaid))}>
+                  Close
+                </Button>
+              )}
+              {!isLoan && status.settled && !full && (
+                <Button size="small" type="link" onClick={() => void onPatch(tx.id, reimbursePatch(total))}>
+                  Reopen
+                </Button>
+              )}
+            </div>
+          </div>
+
+          {status.installments.length > 0 && (
+            <ul className="mb-list">
+              {status.installments.map((row) => (
+                <li key={row.id}>
+                  <span className="mb-date">{formatDayShort(row.valueDate || row.bookingDate)}</span>
+                  <span className="mb-who">{row.counterparty || "Incoming"}</span>
+                  <span className="mb-amount money">+{formatEur(row.amount)}</span>
+                  <button
+                    type="button"
+                    className="mb-unlink"
+                    title="Unlink"
+                    onClick={() => void onPatch(row.id, detachReturnPatch(row))}
+                  >
+                    ×
+                  </button>
+                </li>
+              ))}
+            </ul>
           )}
-        </div>
+
+          {(!status.settled || acceptsLateReimbursement(status)) && (
+            <LinkIncoming origin={tx} ledger={ledger} outstanding={status.outstanding} onPatch={onPatch} />
+          )}
+        </>
       )}
-    </Space>
+    </section>
   );
 }
 
-function AttachedReturn({
+function LinkIncoming({
+  origin,
+  ledger,
+  outstanding,
+  onPatch,
+}: {
+  origin: Transaction;
+  ledger: Transaction[];
+  outstanding: number;
+  onPatch: Patch;
+}) {
+  const candidates = useMemo(() => {
+    const all = candidateReturnBookings(origin, ledger);
+    const target = outstanding > 0 ? outstanding : Math.abs(origin.amount);
+    return [...all].sort((a, b) => {
+      const am = originMatchesIncoming(origin, a, []) ? 0 : 1;
+      const bm = originMatchesIncoming(origin, b, []) ? 0 : 1;
+      if (am !== bm) return am - bm;
+      return Math.abs(a.amount - target) - Math.abs(b.amount - target);
+    });
+  }, [origin, ledger, outstanding]);
+  const [pickedId, setPickedId] = useState<string | undefined>(undefined);
+  const selectedId = candidates.some((row) => row.id === pickedId) ? pickedId : undefined;
+
+  if (!candidates.length) return <p className="mb-empty">No incoming money to link yet.</p>;
+
+  return (
+    <div className="mb-link">
+      <Select
+        showSearch
+        allowClear
+        optionFilterProp="label"
+        value={selectedId}
+        onChange={setPickedId}
+        placeholder="Link incoming money · search payee or amount"
+        popupMatchSelectWidth={false}
+        options={candidates.map((row) => ({
+          value: row.id,
+          label: `${formatDayShort(row.valueDate || row.bookingDate)} · ${row.counterparty || "Incoming"} · ${formatEur(row.amount)}`,
+        }))}
+      />
+      <Button type="primary" disabled={!selectedId} onClick={() => selectedId && void onPatch(selectedId, attachReturnPatch(origin))}>
+        Link
+      </Button>
+    </div>
+  );
+}
+
+function LinkedPayback({
   tx,
   origin,
   ledger,
@@ -190,103 +192,102 @@ function AttachedReturn({
   tx: Transaction;
   origin: Transaction;
   ledger: Transaction[];
-  onPatch: (id: string, patch: Partial<Transaction>) => Promise<void>;
+  onPatch: Patch;
 }) {
   const status = loanOriginStatus(origin, ledger);
-  const index = status.installments.findIndex((row) => row.id === tx.id);
+  const isLoan = originKind(origin) === "lent";
   return (
-    <Space direction="vertical" size="small" style={{ width: "100%" }}>
-      <Typography.Text strong>Attached return</Typography.Text>
-      <Typography.Text>
-        {formatDayShort(origin.valueDate || origin.bookingDate)} · {origin.counterparty || "Money lent"} ·{" "}
-        {formatEur(status.lent)} lent
-        {status.installments.length > 1 && index >= 0
-          ? ` · installment ${index + 1} of ${status.installments.length}`
-          : ""}
-      </Typography.Text>
-      <Typography.Text type="secondary">
-        {status.settled ? "Fully returned." : `${formatEur(status.outstanding)} still open.`}
-      </Typography.Text>
-      <Button type="link" size="small" onClick={() => void onPatch(tx.id, detachReturnPatch(tx))}>
-        Detach
-      </Button>
-    </Space>
+    <section className="booking-panel mb-panel">
+      <div className="mb-head">
+        <span className="booking-label">{isLoan ? "Paid back" : "Reimbursed"}</span>
+        <Button size="small" type="link" onClick={() => void onPatch(tx.id, detachReturnPatch(tx))}>
+          Unlink
+        </Button>
+      </div>
+      <div className="mb-origin">
+        <span className="mb-date">{formatDayShort(origin.valueDate || origin.bookingDate)}</span>
+        <span className="mb-who">{origin.counterparty || "Booking"}</span>
+        <span className="money">{formatEur(Math.abs(origin.amount))}</span>
+      </div>
+      <OriginProgress status={status} isLoan={isLoan} />
+    </section>
   );
 }
 
-function AttachReturn({
+function OriginProgress({ status, isLoan }: { status: LoanOriginStatus; isLoan: boolean }) {
+  const base = isLoan ? status.lent : Math.abs(status.origin.amount);
+  const percent = base > 0 ? Math.min(100, (status.repaid / base) * 100) : 0;
+  return (
+    <div className="mb-summary compact">
+      <div className="mb-bar">
+        <span style={{ width: `${percent}%` }} />
+      </div>
+      <div className="mb-status">
+        <span className="mb-of">
+          {formatEur(status.repaid)} of {formatEur(base)} {isLoan ? "paid back" : "back"}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function LinkToOrigin({
   tx,
   openHits,
   onPatch,
 }: {
   tx: Transaction;
   openHits: ReturnType<typeof openOriginsForAttach>;
-  onPatch: (id: string, patch: Partial<Transaction>) => Promise<void>;
+  onPatch: Patch;
 }) {
-  const [amountQuery, setAmountQuery] = useState(String(Math.abs(tx.amount)).replace(".", ","));
-  const amountFilter = tryParseAmount(amountQuery);
-  const filtered = useMemo(() => {
-    if (amountFilter == null) return openHits;
-    return openHits.filter(
-      (hit) =>
-        amountMatchesFilter(hit.outstanding, null, null, amountFilter) ||
-        amountMatchesFilter(hit.lent, null, null, amountFilter),
-    );
-  }, [openHits, amountFilter]);
-  const [originId, setOriginId] = useState("");
-  const selectedId = filtered.some((hit) => hit.origin.id === originId)
-    ? originId
-    : filtered[0]?.origin.id ?? "";
-
-  if (tx.amount <= 0) return null;
-  if (!openHits.length) {
-    return tx.categoryId === "loan_in" ? (
-      <Typography.Text type="secondary">
-        Marked as money returned, but it is not attached to a lent booking yet.
-      </Typography.Text>
-    ) : null;
-  }
+  const [originId, setOriginId] = useState<string | undefined>(undefined);
+  const selectedId = openHits.some((hit) => hit.origin.id === originId) ? originId : undefined;
+  const groups = (
+    [
+      { label: "Lent to people", kind: "lent" as const },
+      { label: "To be reimbursed", kind: "back" as const },
+    ] as const
+  )
+    .map((group) => ({
+      label: group.label,
+      options: openHits
+        .filter((hit) => originKind(hit.origin) === group.kind)
+        .map((hit) => ({
+          value: hit.origin.id,
+          label: `${formatDayShort(hit.origin.valueDate || hit.origin.bookingDate)} · ${hit.origin.counterparty || "—"} · ${
+            group.kind === "lent" ? `${formatEur(hit.outstanding)} open` : formatEur(Math.abs(hit.origin.amount))
+          }`,
+        })),
+    }))
+    .filter((group) => group.options.length);
 
   return (
-    <Space direction="vertical" size="small" style={{ width: "100%" }}>
-      <Typography.Text strong>Attach to money lent</Typography.Text>
-      <Typography.Text type="secondary">
-        Pick which lent booking this incoming returns — including a partial installment.
-      </Typography.Text>
-      <Input
-        allowClear
-        value={amountQuery}
-        onChange={(e) => setAmountQuery(e.target.value)}
-        placeholder="Filter by amount"
-        addonAfter="€"
-      />
-      {filtered.length === 0 ? (
-        <Typography.Text type="secondary">No open money lent matches that amount.</Typography.Text>
-      ) : (
-        <>
-          <Select
-            showSearch
-            optionFilterProp="label"
-            value={selectedId || undefined}
-            onChange={setOriginId}
-            style={{ width: "100%" }}
-            options={filtered.map((hit) => ({
-              value: hit.origin.id,
-              label: `${formatDayShort(hit.origin.valueDate || hit.origin.bookingDate)} · ${hit.origin.counterparty || "Money lent"} · ${formatEur(hit.outstanding)} open`,
-            }))}
-          />
-          <Button
-            type="primary"
-            disabled={!selectedId}
-            onClick={() => {
-              const origin = filtered.find((hit) => hit.origin.id === selectedId)?.origin;
-              if (origin) void onPatch(tx.id, attachReturnPatch(origin));
-            }}
-          >
-            Attach this booking
-          </Button>
-        </>
-      )}
-    </Space>
+    <section className="booking-panel mb-panel">
+      <div className="mb-head">
+        <span className="booking-label">Paid back or reimbursed?</span>
+      </div>
+      <div className="mb-link">
+        <Select
+          showSearch
+          allowClear
+          optionFilterProp="label"
+          value={selectedId}
+          onChange={setOriginId}
+          placeholder="Pick the booking it pays back"
+          popupMatchSelectWidth={false}
+          options={groups}
+        />
+        <Button
+          type="primary"
+          disabled={!selectedId}
+          onClick={() => {
+            const origin = openHits.find((hit) => hit.origin.id === selectedId)?.origin;
+            if (origin) void onPatch(tx.id, attachReturnPatch(origin));
+          }}
+        >
+          Link
+        </Button>
+      </div>
+    </section>
   );
 }

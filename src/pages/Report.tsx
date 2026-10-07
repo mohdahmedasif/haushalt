@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Button, Col, Flex, InputNumber, Row } from "antd";
+import { Button, Flex, InputNumber } from "antd";
 import { DownloadOutlined } from "@ant-design/icons";
 import { formatSheetNumber } from "../lib/money";
 import { currentMonth } from "../lib/dates";
@@ -36,7 +36,7 @@ export function ReportPage({
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `Monthly Expenditure ${year}.csv`;
+    a.download = `Haushalt year ${year}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -44,7 +44,7 @@ export function ReportPage({
   return (
     <>
       <PageHeader
-        title={`Monthly Expenditure ${year}`}
+        title={`Year ${year}`}
         extra={
           <Flex gap={8}>
             <Button onClick={() => onYearChange(year - 1)}>‹</Button>
@@ -56,26 +56,27 @@ export function ReportPage({
           </Flex>
         }
       >
-        Workbook layout: budget, twelve months, totals, then leftover.
+        Budget, twelve months, totals, then leftover — like a spreadsheet.
       </PageHeader>
 
-      <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
-        <Col xs={12} lg={6}>
-          <StatCard
-            label="Total expense"
-            value={<span style={{ color: "var(--negative)" }}>{formatSheetNumber(totalExpense?.total ?? 0)}</span>}
-          />
-        </Col>
-        <Col xs={12} lg={6}>
-          <StatCard label="Total income" value={<Money value={totalIncome?.total ?? 0} />} />
-        </Col>
-        <Col xs={12} lg={6}>
-          <StatCard label="Grand total" value={<Money value={grand?.total ?? 0} />} />
-        </Col>
-        <Col xs={12} lg={6}>
-          <StatCard label="Planned leftover" value={<Money value={grand?.budget ?? 0} />} />
-        </Col>
-      </Row>
+      <div className="page-hero cols-3">
+        <div className="hero-panel">
+          <div className="stat-label">Year leftover</div>
+          <div className="stat-value hero">
+            <Money value={grand?.total ?? 0} />
+          </div>
+          <div className="stat-caption">
+            Income minus expenses in {year}
+            {grand ? ` · planned ${formatSheetNumber(grand.budget)}` : ""}
+          </div>
+        </div>
+        <StatCard
+          label="Expenses"
+          value={<span style={{ color: "var(--negative)" }}>{formatSheetNumber(totalExpense?.total ?? 0)}</span>}
+          caption="All expense categories"
+        />
+        <StatCard label="Income" value={<Money value={totalIncome?.total ?? 0} />} caption="All income categories" />
+      </div>
 
       <div className="sheet-wrap">
         <table className="sheet">

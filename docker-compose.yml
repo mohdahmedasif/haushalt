@@ -1,0 +1,18 @@
+services:
+  haushalt:
+    build:
+      context: .
+      args:
+        VITE_HAUSHALT_API_KEY: ${VITE_HAUSHALT_API_KEY:-haushalt-local}
+    ports:
+      - "8787:8787"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8787"
+      HAUSHALT_API_KEY: ${HAUSHALT_API_KEY:-haushalt-local}
+      HAUSHALT_AI_KEY: ${HAUSHALT_AI_KEY:-}
+      HAUSHALT_AI_BASE_URL: ${HAUSHALT_AI_BASE_URL:-}
+      HAUSHALT_AI_MODEL: ${HAUSHALT_AI_MODEL:-}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

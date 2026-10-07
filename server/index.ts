@@ -13,17 +13,36 @@ import { buildForecast } from "../src/lib/forecast.ts";
 import { answerFinanceQuestion } from "../src/lib/ask.ts";
 import { summarizeMonth } from "../src/lib/summary.ts";
 import { buildYearSheet } from "../src/lib/report.ts";
-import { buildLending } from "../src/lib/lending.ts";
-import type { CashMovement, ImportPreviewRow, Transaction } from "../src/types.ts";
 import {
+  buildLending,
+  loanShare,
+  normalizeReimburse,
+  originKind,
+  PAYBACK_CATEGORIES,
+  paybackCategory,
+  reimburseAfterLink,
+} from "../src/lib/lending.ts";
+import { goldPiecesError, goldTotals, normalizeGoldPieces, piecesSummary } from "../src/lib/gold.ts";
+import type { CashMovement, GoldForm, GoldLot, GoldPiece, ImportPreviewRow, Transaction } from "../src/types.ts";
+import {
+  adoptImportedDetails,
   cashBalance,
+  replaceOpeningCash,
   db,
-  findBySoftKey,
-  fingerprintExists,
+  findImportMatch,
   getSettings,
   getTransaction,
   insertCashMovement,
+  updateCashMovement,
+  deleteCashMovement,
+  syncCashMovementCategory,
+  syncWalletForBankTransfer,
   insertCategory,
+  insertGoldLot,
+  updateGoldLot,
+  deleteGoldLot,
+  getGoldLot,
+  listGoldLots,
   insertImport,
   findOrCreateBorrower,
   insertRule,
@@ -44,7 +63,8 @@ import {
   ensureSeedCategories,
   repairAccountFeeMonths,
   repairSpreads,
-  updateCategoryBudget,
+  updateCategory,
+  deleteCategory,
   updateTransaction,
 } from "./db.ts";
 
@@ -52,6 +72,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 loadEnv(join(root, ".env"));
 
 const API_KEY = process.env.HAUSHALT_API_KEY || "haushalt-local";
+const HOST = process.env.HOST || "127.0.0.1";
 const PORT = Number(process.env.PORT || 8787);
 
 seedIfEmpty();
@@ -88,19 +109,26 @@ app.get("/api/v1", (_req, res) => {
       "GET /api/v1/health",
       "GET /api/v1/summary?month=YYYY-MM",
       "GET /api/v1/account",
-      "POST /api/v1/setup  { openingBalance, openingBalanceDate, onboarded? }",
+      "POST /api/v1/setup  { openingBalance, openingBalanceDate, openingCash?, onboarded? }",
       "POST /api/v1/reset",
       "PATCH /api/v1/settings  { openingBalance, openingBalanceDate }",
       "GET /api/v1/categories",
       "POST /api/v1/categories  { name, kind, budget? }",
-      "PATCH /api/v1/categories/:id  { budget, name? }",
+      "PATCH /api/v1/categories/:id  { budget?, name?, showInReport? }",
+      "DELETE /api/v1/categories/:id  { moveTo? }",
       "GET /api/v1/transactions?month=&uncategorized=&category=",
       "PATCH /api/v1/transactions/:id",
       "POST /api/v1/imports/preview  { fileName, csvText }",
       "POST /api/v1/imports  { fileName, csvText, includeSoft }",
       "GET /api/v1/imports",
       "GET /api/v1/cash",
-      "POST /api/v1/cash/movements  { type: in|out|opening, amount, categoryId?, date, note? }",
+      "POST /api/v1/cash/movements  { type: in|out|bank|opening, amount, categoryId?, date, note? }",
+      "PATCH /api/v1/cash/movements/:id  { amount?, date?, categoryId?, note? }",
+      "DELETE /api/v1/cash/movements/:id",
+      "GET /api/v1/gold",
+      "POST /api/v1/gold  { purchasedAt, pieces?: [{ grams, form?, purity?, note? }], grams?, purity?, form?, dealer?, invoiceRef?, totalPaid, note? }",
+      "PATCH /api/v1/gold/:id",
+      "DELETE /api/v1/gold/:id",
       "GET /api/v1/lending",
       "GET /api/v1/contracts",
       "POST /api/v1/contracts/analyze",
@@ -147,19 +175,56 @@ app.post("/api/v1/categories", (req, res) => {
     color: colors[existing.length % colors.length],
     sort,
     excludeFromBudget: false,
+    showInReport: true,
   };
   insertCategory(category);
   res.status(201).json(category);
 });
 
 app.patch("/api/v1/categories/:id", (req, res) => {
-  const budget = Number(req.body?.budget);
-  if (Number.isNaN(budget)) {
-    res.status(400).json({ error: "budget is required" });
+  const body = req.body ?? {};
+  const patch: { budget?: number; name?: string; showInReport?: boolean } = {};
+  if ("budget" in body) {
+    const budget = Number(body.budget);
+    if (Number.isNaN(budget) || budget < 0) {
+      res.status(400).json({ error: "budget must be 0 or more" });
+      return;
+    }
+    patch.budget = budget;
+  }
+  if ("name" in body) {
+    const name = String(body.name ?? "").trim();
+    if (!name) {
+      res.status(400).json({ error: "name cannot be empty" });
+      return;
+    }
+    patch.name = name;
+  }
+  if ("showInReport" in body) patch.showInReport = Boolean(body.showInReport);
+  if (!("budget" in patch) && !("name" in patch) && !("showInReport" in patch)) {
+    res.status(400).json({ error: "budget, name, or showInReport required" });
     return;
   }
-  updateCategoryBudget(req.params.id, budget, req.body?.name);
-  res.json(listCategories().find((c) => c.id === req.params.id) ?? null);
+  const updated = updateCategory(req.params.id, patch);
+  if (!updated) {
+    res.status(404).json({ error: "Category not found" });
+    return;
+  }
+  res.json(updated);
+});
+
+app.delete("/api/v1/categories/:id", (req, res) => {
+  const moveTo = req.body?.moveTo
+    ? String(req.body.moveTo)
+    : req.query.moveTo
+      ? String(req.query.moveTo)
+      : null;
+  const result = deleteCategory(req.params.id, moveTo);
+  if (!result.ok) {
+    res.status(result.error === "Category not found" ? 404 : 400).json({ error: result.error });
+    return;
+  }
+  res.json({ ok: true, categories: listCategories() });
 });
 
 app.get("/api/v1/people", (_req, res) => {
@@ -226,14 +291,22 @@ app.post("/api/v1/rules/apply", (_req, res) => {
       loanOriginId: suggestion.loanOriginId ?? null,
       spreadMonths: suggestion.spreadMonths,
       spreadStart: suggestion.spreadMonths > 1 ? feeSpreadStart(tx.purpose, tx.spreadStart || tx.month) : null,
-      excluded: suggestion.categoryId === "ignore" || suggestion.categoryId === "to_cash" || suggestion.categoryId === "internal",
+      excluded:
+        suggestion.categoryId === "ignore" ||
+        suggestion.categoryId === "to_cash" ||
+        suggestion.categoryId === "from_cash" ||
+        suggestion.categoryId === "internal",
     });
-    const updated = all.find((row) => row.id === tx.id);
-    if (updated) {
-      updated.categoryId = suggestion.categoryId;
-      updated.loanPersonId = suggestion.personId;
-      updated.loanDirection = suggestion.loanDirection;
-      updated.loanOriginId = suggestion.loanOriginId ?? null;
+    const updated = getTransaction(tx.id);
+    if (updated) syncWalletForBankTransfer(updated, tx.categoryId);
+    const index = all.findIndex((row) => row.id === tx.id);
+    if (index >= 0) {
+      all[index] = normalizeReimburse({
+        ...all[index],
+        categoryId: suggestion.categoryId,
+        loanPersonId: suggestion.personId,
+        loanOriginId: suggestion.loanOriginId ?? null,
+      });
     }
     applied += 1;
   }
@@ -263,6 +336,7 @@ app.patch("/api/v1/transactions/:id", (req, res) => {
     "loanDirection",
     "loanOriginId",
     "month",
+    "reimburseAmount",
   ] as const;
   const patch: Partial<Transaction> = {};
   for (const key of allowed) {
@@ -273,11 +347,29 @@ app.patch("/api/v1/transactions/:id", (req, res) => {
     res.status(404).json({ error: "Transaction not found" });
     return;
   }
+  if ("reimburseAmount" in patch) {
+    const value = Number(patch.reimburseAmount);
+    if (!Number.isFinite(value) || value < 0) {
+      res.status(400).json({ error: "reimburseAmount must be 0 or more" });
+      return;
+    }
+    patch.reimburseAmount = Math.min(round2(value), Math.abs(current.amount));
+  }
+  if ("categoryId" in patch && patch.categoryId) {
+    const transferExclude = new Set(["ignore", "to_cash", "from_cash", "internal"]);
+    if (transferExclude.has(patch.categoryId) && !("excluded" in patch)) patch.excluded = true;
+  }
   applyLoanSemantics(current, patch);
   const updated = updateTransaction(req.params.id, patch);
   if (!updated) {
     res.status(404).json({ error: "Transaction not found" });
     return;
+  }
+  if (updated.source === "cash" && ("categoryId" in patch || "splits" in patch)) {
+    syncCashMovementCategory(updated.id, updated.splits.length ? null : updated.categoryId);
+  }
+  if (updated.source === "bank" && "categoryId" in patch) {
+    syncWalletForBankTransfer(updated, current.categoryId);
   }
   if (
     updated.categoryId &&
@@ -356,6 +448,14 @@ app.post("/api/v1/setup", (req, res) => {
     openingBalanceDate: date,
     onboarded: req.body?.onboarded === false ? false : Boolean(req.body?.onboarded) || getSettings().onboarded,
   });
+  if ("openingCash" in (req.body ?? {})) {
+    const openingCash = Number(req.body.openingCash || 0);
+    if (!Number.isFinite(openingCash) || openingCash < 0) {
+      res.status(400).json({ error: "openingCash must be 0 or more" });
+      return;
+    }
+    replaceOpeningCash(Math.round(openingCash * 100) / 100, date);
+  }
   res.json(accountState());
 });
 
@@ -390,55 +490,38 @@ app.get("/api/v1/cash", (_req, res) => {
 
 app.post("/api/v1/cash/movements", (req, res) => {
   const typeRaw = String(req.body?.type ?? "");
-  const type = typeRaw === "in" ? "cash_in" : typeRaw === "out" ? "cash_out" : typeRaw === "opening" ? "opening" : "";
+  const type =
+    typeRaw === "in"
+      ? "cash_in"
+      : typeRaw === "out"
+        ? "cash_out"
+        : typeRaw === "bank"
+          ? "bank_out"
+          : typeRaw === "opening"
+            ? "opening"
+            : "";
   const amount = Number(req.body?.amount);
   const date = String(req.body?.date ?? new Date().toISOString().slice(0, 10));
   const note = String(req.body?.note ?? "");
   const categoryId = req.body?.categoryId ? String(req.body.categoryId) : null;
-  const bookRemainder = Boolean(req.body?.bookRemainder);
   if (!type || !(amount > 0)) {
-    res.status(400).json({ error: "type must be in|out|opening and amount must be > 0" });
+    res.status(400).json({ error: "type must be in|out|bank|opening and amount must be > 0" });
     return;
   }
 
   const now = new Date().toISOString();
   const month = monthKey(date);
   let transactionId: string | null = null;
-  let movementAmount = Math.abs(amount);
-  let txCategoryId: string | null = categoryId ?? (type === "cash_out" ? "miscellaneous" : "other_income");
-  let splits: Transaction["splits"] = [];
-
-  if (type === "cash_out" && bookRemainder) {
-    const wallet = cashBalance();
-    const classified = Math.round(Math.abs(amount) * 100) / 100;
-    if (classified > wallet + 0.005) {
-      res.status(400).json({ error: `Only ${wallet.toFixed(2)} € left in the wallet` });
-      return;
-    }
-    const rest = Math.round((wallet - classified) * 100) / 100;
-    if (rest > 0.005) {
-      if (!categoryId) {
-        res.status(400).json({ error: "Pick a category for the classified part" });
-        return;
-      }
-      movementAmount = wallet;
-      txCategoryId = null;
-      splits = [
-        { id: crypto.randomUUID(), categoryId, amount: classified },
-        { id: crypto.randomUUID(), categoryId: "cash_unclassified", amount: rest },
-      ];
-    }
-  }
+  const movementAmount = Math.abs(amount);
+  const txCategoryId = categoryId ?? (type === "cash_out" ? "miscellaneous" : "other_income");
 
   if (type === "cash_out" || type === "cash_in") {
     const txId = crypto.randomUUID();
     transactionId = txId;
     const signed = type === "cash_out" ? -Math.abs(movementAmount) : Math.abs(movementAmount);
     const catName =
-      splits.length > 0
-        ? "Cash spend"
-        : listCategories().find((c) => c.id === categoryId)?.name ||
-          (type === "cash_out" ? "Cash spend" : "Cash in");
+      listCategories().find((c) => c.id === categoryId)?.name ||
+      (type === "cash_out" ? "Cash spend" : "Cash in");
     insertTransaction({
       id: txId,
       fingerprint: `cash:${txId}`,
@@ -458,7 +541,7 @@ app.post("/api/v1/cash/movements", (req, res) => {
       creditorId: "",
       info: "",
       categoryId: txCategoryId,
-      splits,
+      splits: [],
       spreadMonths: 1,
       spreadStart: null,
       excluded: false,
@@ -466,6 +549,7 @@ app.post("/api/v1/cash/movements", (req, res) => {
       loanPersonId: req.body?.loanPersonId ?? null,
       loanDirection: req.body?.loanDirection ?? null,
       loanOriginId: req.body?.loanOriginId ?? null,
+      reimburseAmount: 0,
       importId: null,
       source: "cash",
       createdAt: now,
@@ -478,11 +562,8 @@ app.post("/api/v1/cash/movements", (req, res) => {
     amount: movementAmount,
     date,
     month,
-    categoryId: splits.length ? "cash_unclassified" : categoryId,
-    note:
-      splits.length > 0
-        ? note || `Cash · split (${formatCashSplitNote(splits)})`
-        : note,
+    categoryId: type === "bank_out" ? "from_cash" : categoryId,
+    note: note || (type === "bank_out" ? "Cash to bank" : ""),
     transactionId,
     createdAt: now,
   };
@@ -490,9 +571,79 @@ app.post("/api/v1/cash/movements", (req, res) => {
   res.status(201).json({ movement, balance: cashBalance() });
 });
 
-function formatCashSplitNote(splits: Transaction["splits"]): string {
-  return splits.map((line) => `${line.categoryId} ${line.amount}`).join(" + ");
-}
+app.patch("/api/v1/cash/movements/:id", (req, res) => {
+  const body = req.body ?? {};
+  const patch: { amount?: number; date?: string; categoryId?: string | null; note?: string } = {};
+  if ("amount" in body) patch.amount = Number(body.amount);
+  if ("date" in body) patch.date = String(body.date);
+  if ("categoryId" in body) patch.categoryId = body.categoryId ? String(body.categoryId) : null;
+  if ("note" in body) patch.note = String(body.note ?? "");
+  const updated = updateCashMovement(req.params.id, patch);
+  if (!updated) {
+    res.status(404).json({ error: "Cash movement not found or not editable" });
+    return;
+  }
+  res.json({ movement: updated, balance: cashBalance() });
+});
+
+app.delete("/api/v1/cash/movements/:id", (req, res) => {
+  if (!deleteCashMovement(req.params.id)) {
+    res.status(404).json({ error: "Cash movement not found or not editable" });
+    return;
+  }
+  res.json({ ok: true, balance: cashBalance() });
+});
+
+app.get("/api/v1/gold", (_req, res) => {
+  const lots = listGoldLots();
+  res.json({ lots, totals: goldTotals(lots) });
+});
+
+app.post("/api/v1/gold", (req, res) => {
+  const parsed = parseGoldInput(req.body);
+  if ("error" in parsed) {
+    res.status(400).json({ error: parsed.error });
+    return;
+  }
+  const lot: GoldLot = {
+    id: crypto.randomUUID(),
+    createdAt: new Date().toISOString(),
+    purchasedAt: parsed.purchasedAt ?? "",
+    grams: parsed.grams ?? 0,
+    purity: parsed.purity ?? "999.9",
+    form: parsed.form ?? "bar",
+    dealer: parsed.dealer ?? "",
+    invoiceRef: parsed.invoiceRef ?? "",
+    totalPaid: parsed.totalPaid ?? 0,
+    pricePerGram: parsed.pricePerGram ?? 0,
+    note: parsed.note ?? "",
+    pieces: parsed.pieces ?? [],
+  };
+  insertGoldLot(lot);
+  res.status(201).json(lot);
+});
+
+app.patch("/api/v1/gold/:id", (req, res) => {
+  if (!getGoldLot(req.params.id)) {
+    res.status(404).json({ error: "Gold lot not found" });
+    return;
+  }
+  const parsed = parseGoldInput(req.body, true);
+  if ("error" in parsed) {
+    res.status(400).json({ error: parsed.error });
+    return;
+  }
+  const updated = updateGoldLot(req.params.id, parsed);
+  res.json(updated);
+});
+
+app.delete("/api/v1/gold/:id", (req, res) => {
+  if (!deleteGoldLot(req.params.id)) {
+    res.status(404).json({ error: "Gold lot not found" });
+    return;
+  }
+  res.json({ ok: true });
+});
 
 app.get("/api/v1/lending", (_req, res) => {
   res.json(buildLending(listPeople(), listTransactions()));
@@ -547,6 +698,7 @@ app.get("/api/v1/export", (_req, res) => {
     rules: listRules(),
     transactions: listTransactions(),
     cashMovements: listCashMovements(),
+    goldLots: listGoldLots(),
     imports: listImports(),
   });
 });
@@ -559,9 +711,76 @@ if (existsSync(dist)) {
   });
 }
 
-app.listen(PORT, "127.0.0.1", () => {
-  console.log(`Haushalt API http://127.0.0.1:${PORT}/api/v1`);
+app.listen(PORT, HOST, () => {
+  console.log(`Haushalt API http://${HOST}:${PORT}/api/v1`);
 });
+
+const GOLD_FORMS = new Set<GoldForm>(["bar", "coin", "jewelry", "other"]);
+
+function parseGoldInput(
+  body: Record<string, unknown> | undefined,
+  partial = false,
+): Partial<Omit<GoldLot, "id" | "createdAt">> | { error: string } {
+  const raw = body ?? {};
+  const out: Partial<Omit<GoldLot, "id" | "createdAt">> = {};
+
+  if (!partial || "purchasedAt" in raw) {
+    const date = String(raw.purchasedAt ?? "").slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { error: "purchasedAt must be YYYY-MM-DD" };
+    out.purchasedAt = date;
+  }
+  if (!partial || "pieces" in raw || "grams" in raw) {
+    let pieces: GoldPiece[] = [];
+    if (Array.isArray(raw.pieces) && raw.pieces.length > 0) {
+      pieces = normalizeGoldPieces(raw.pieces);
+    } else {
+      const grams = Number(raw.grams);
+      if (!Number.isFinite(grams) || grams <= 0) return { error: "grams must be greater than 0" };
+      const form = String(raw.form || "bar") as GoldForm;
+      if (!GOLD_FORMS.has(form)) return { error: "form must be bar, coin, jewelry or other" };
+      pieces = [
+        {
+          id: crypto.randomUUID(),
+          grams: Math.round(grams * 1000) / 1000,
+          purity: String(raw.purity ?? "999.9").trim() || "999.9",
+          form,
+          note: "",
+        },
+      ];
+    }
+    const piecesError = goldPiecesError(pieces);
+    if (piecesError) return { error: piecesError };
+    const summary = piecesSummary(pieces);
+    out.pieces = pieces;
+    out.grams = summary.grams;
+    out.purity = summary.purity;
+    out.form = summary.form;
+  }
+  if (!partial || "totalPaid" in raw) {
+    const totalPaid = Number(raw.totalPaid ?? 0);
+    if (!Number.isFinite(totalPaid) || totalPaid < 0) return { error: "totalPaid must be 0 or more" };
+    out.totalPaid = Math.round(totalPaid * 100) / 100;
+  }
+  if ((!partial || "form" in raw) && out.form == null) {
+    const form = String(raw.form || "bar") as GoldForm;
+    if (!GOLD_FORMS.has(form)) return { error: "form must be bar, coin, jewelry or other" };
+    out.form = form;
+  }
+  if ((!partial || "purity" in raw) && out.purity == null) {
+    out.purity = String(raw.purity ?? "999.9").trim() || "999.9";
+  }
+  if (!partial || "dealer" in raw) out.dealer = String(raw.dealer ?? "").trim();
+  if (!partial || "invoiceRef" in raw) out.invoiceRef = String(raw.invoiceRef ?? "").trim();
+  if (!partial || "note" in raw) out.note = String(raw.note ?? "").trim();
+
+  const grams = out.grams;
+  const totalPaid = out.totalPaid;
+  if (grams != null && totalPaid != null) {
+    out.pricePerGram = grams > 0 ? Math.round((totalPaid / grams) * 100) / 100 : 0;
+  }
+
+  return out;
+}
 
 function previewImport(csvText: string): ImportPreviewRow[] {
   const settings = getSettings();
@@ -570,23 +789,23 @@ function previewImport(csvText: string): ImportPreviewRow[] {
     if (settings.skipZeroAmount && row.amount === 0) {
       return { row, status: "skip" as const, reason: "Zero-amount statement row" };
     }
-    if (fingerprintExists(row.fingerprint)) {
-      return {
-        row,
-        status: "duplicate" as const,
-        reason: "Exact match of date, amount, payee, purpose and references",
-      };
-    }
-    const soft = findBySoftKey(row.bookingDate, row.counterparty, row.iban, row.amount);
-    if (soft) {
+    const match = findImportMatch(row);
+    if (!match) return { row, status: "new" as const };
+    if (match.kind === "soft") {
       return {
         row,
         status: "soft" as const,
-        existingId: soft.id,
-        reason: `Same date, amount and payee as “${(soft.purpose || soft.counterparty).slice(0, 60)}”`,
+        existingId: match.tx.id,
+        reason: `Same date, amount and payee as “${(match.tx.purpose || match.tx.counterparty).slice(0, 60)}”`,
       };
     }
-    return { row, status: "new" as const };
+    const reason =
+      match.kind === "endToEnd"
+        ? "Same End-to-End reference — already imported (pending booking that later settled)"
+        : match.kind === "settled"
+          ? "Same purpose, amount and value date — already imported"
+          : "Exact match of date, amount, payee, purpose and references";
+    return { row, status: "duplicate" as const, existingId: match.tx.id, reason };
   });
 }
 
@@ -606,8 +825,11 @@ function commitImport(fileName: string, preview: ImportPreviewRow[], includeSoft
       const basis = settings.monthBasis === "bookingDate" ? item.row.bookingDate : item.row.valueDate;
       const rawMonth = monthKey(basis || item.row.bookingDate);
       const month = accountFeeMonth(item.row.valueDate || basis, item.row.bookingText) ?? rawMonth;
-      const excluded = suggestion?.categoryId === "ignore" || suggestion?.categoryId === "to_cash";
-      const tx: Transaction = {
+      const excluded =
+        suggestion?.categoryId === "ignore" ||
+        suggestion?.categoryId === "to_cash" ||
+        suggestion?.categoryId === "from_cash";
+      const tx: Transaction = normalizeReimburse({
         id: crypto.randomUUID(),
         fingerprint: item.row.fingerprint,
         accountIban: item.row.accountIban,
@@ -635,25 +857,21 @@ function commitImport(fileName: string, preview: ImportPreviewRow[], includeSoft
         loanPersonId: suggestion?.personId ?? null,
         loanDirection: suggestion?.loanDirection ?? null,
         loanOriginId: suggestion?.loanOriginId ?? null,
+        reimburseAmount: 0,
         importId,
         source: "bank",
         createdAt: now,
-      };
+      });
       insertTransaction(tx);
       ledger.push(tx);
-      if (suggestion?.categoryId === "to_cash" && tx.amount < 0) {
-        insertCashMovement({
-          id: crypto.randomUUID(),
-          type: "atm_in",
-          amount: Math.abs(tx.amount),
-          date: tx.valueDate || tx.bookingDate,
-          month,
-          categoryId: "to_cash",
-          note: tx.purpose || "ATM withdrawal",
-          transactionId: tx.id,
-          createdAt: now,
-        });
-      }
+      syncWalletForBankTransfer(tx, null);
+    }
+    for (const item of preview) {
+      if (item.status !== "duplicate" || !item.existingId) continue;
+      const existing = getTransaction(item.existingId);
+      if (!existing) continue;
+      if (existing.bookingDate === item.row.bookingDate && existing.fingerprint === item.row.fingerprint) continue;
+      adoptImportedDetails(item.existingId, item.row);
     }
     const batch = {
       id: importId,
@@ -709,35 +927,62 @@ function round2(n: number): number {
 }
 
 function applyLoanSemantics(current: Transaction, patch: Partial<Transaction>): void {
-  const nextSplits = patch.splits ?? current.splits;
-  const nextCategory = "categoryId" in patch ? patch.categoryId : current.categoryId;
-  const lent =
-    nextCategory === "loan_out" ||
-    nextSplits.some((line) => line.categoryId === "loan_out") ||
-    patch.loanDirection === "lent";
-  const repaid =
-    nextCategory === "loan_in" ||
-    nextSplits.some((line) => line.categoryId === "loan_in") ||
-    Boolean(patch.loanOriginId) ||
-    patch.loanDirection === "repaid";
+  const next = { ...current, ...patch };
+  const nowLoan = loanShare(next);
+  const wasLoan = loanShare(current);
 
-  if (lent) {
-    if (!("loanDirection" in patch)) patch.loanDirection = "lent";
-    if (!("loanOriginId" in patch)) patch.loanOriginId = null;
-    const personId = patch.loanPersonId ?? current.loanPersonId;
-    const splitLent = nextSplits.some((line) => line.categoryId === "loan_out");
-    if (!personId && !splitLent) {
+  if (current.amount < 0) {
+    if (!("reimburseAmount" in patch)) {
+      if (nowLoan > 0 && wasLoan === 0) patch.reimburseAmount = nowLoan;
+      else if (nowLoan === 0 && wasLoan > 0 && !hasPaybacks(current.id)) patch.reimburseAmount = 0;
+    } else if (nowLoan > 0 && (patch.reimburseAmount ?? 0) <= 0) {
+      patch.reimburseAmount = nowLoan;
+    }
+    if (nowLoan > 0 && !next.splits.length && !next.loanPersonId) {
       patch.loanPersonId = findOrCreateBorrower(current.counterparty, current.iban).id;
     }
-  } else if (repaid) {
-    if (!("loanDirection" in patch)) patch.loanDirection = "repaid";
-    if (patch.loanOriginId) {
-      const origin = getTransaction(patch.loanOriginId);
-      if (origin) {
-        if (!("loanPersonId" in patch)) patch.loanPersonId = origin.loanPersonId;
-        if (!("categoryId" in patch) && nextSplits.length === 0) patch.categoryId = "loan_in";
-      }
+    const reimburse = "reimburseAmount" in patch ? patch.reimburseAmount ?? 0 : current.reimburseAmount;
+    if (reimburse <= 0 && current.reimburseAmount > 0) detachPaybacks(current.id);
+    else if (originKind(next) !== originKind(current)) retagPaybacks(current.id, paybackCategory(next));
+    return;
+  }
+
+  if (patch.loanOriginId) {
+    const origin = getTransaction(patch.loanOriginId);
+    if (!origin || origin.amount >= 0) {
+      patch.loanOriginId = null;
+      return;
     }
+    const lent = originKind(origin) === "lent";
+    if (!("loanPersonId" in patch)) patch.loanPersonId = lent ? origin.loanPersonId : null;
+    if (next.splits.length === 0 && (!("categoryId" in patch) || PAYBACK_CATEGORIES.has(patch.categoryId ?? ""))) {
+      patch.categoryId = paybackCategory(origin);
+    }
+    if (!lent) {
+      const reimburse = reimburseAfterLink(origin, current, listTransactions());
+      if (reimburse > origin.reimburseAmount + 0.004) updateTransaction(origin.id, { reimburseAmount: reimburse });
+    }
+  }
+}
+
+function retagPaybacks(originId: string, categoryId: string): void {
+  for (const tx of listTransactions()) {
+    if (tx.loanOriginId !== originId || !PAYBACK_CATEGORIES.has(tx.categoryId ?? "")) continue;
+    updateTransaction(tx.id, { categoryId });
+  }
+}
+
+function hasPaybacks(originId: string): boolean {
+  return listTransactions().some((tx) => tx.loanOriginId === originId);
+}
+
+function detachPaybacks(originId: string): void {
+  for (const tx of listTransactions()) {
+    if (tx.loanOriginId !== originId) continue;
+    updateTransaction(tx.id, {
+      loanOriginId: null,
+      categoryId: PAYBACK_CATEGORIES.has(tx.categoryId ?? "") ? null : tx.categoryId,
+    });
   }
 }
 

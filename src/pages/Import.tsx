@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Alert, Button, Checkbox, Col, Row, Table, Typography, Upload } from "antd";
+import { Alert, Button, Checkbox, Table, Typography, Upload } from "antd";
 import { InboxOutlined } from "@ant-design/icons";
 import { formatDay } from "../lib/dates";
 import { PageHeader } from "../ui/PageHeader";
@@ -46,7 +46,7 @@ export function ImportPage({
     setBusy(true);
     try {
       const batch = await onCommit(fileName, csvText, includeSoft);
-      setResult(`Added ${batch.added} · exact duplicates ${batch.duplicates} · skipped ${batch.skipped}`);
+      setResult(`Added ${batch.added} · duplicates ${batch.duplicates} · skipped ${batch.skipped}`);
       setPreview(null);
       setCsvText("");
     } catch (error) {
@@ -67,28 +67,9 @@ export function ImportPage({
 
   return (
     <>
-      <PageHeader title="Import bank CSV">
-        CAMT export from the app. Exact re-uploads are blocked. Soft matches need your OK.
+      <PageHeader title="Import">
+        Drop a Sparkasse Umsatz CSV. Exact duplicates and settled pending bookings are skipped; soft matches need your OK.
       </PageHeader>
-
-      <SectionCard>
-        <div className="import-drop">
-          <Upload.Dragger
-            accept=".csv,.CSV,text/csv"
-            showUploadList={false}
-            beforeUpload={(file) => {
-              void handleFile(file);
-              return false;
-            }}
-          >
-            <p className="ant-upload-drag-icon">
-              <InboxOutlined />
-            </p>
-            <p className="ant-upload-text">Drop a bank Umsatz CSV here</p>
-            <p className="ant-upload-hint">or click to choose a file{fileName ? ` · ${fileName}` : ""}</p>
-          </Upload.Dragger>
-        </div>
-      </SectionCard>
 
       {result && (
         <Alert
@@ -100,23 +81,15 @@ export function ImportPage({
 
       {counts && (
         <>
-          <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
-            <Col xs={12} md={6}>
-              <StatCard label="New" value={counts.new} />
-            </Col>
-            <Col xs={12} md={6}>
-              <StatCard label="Exact duplicates" value={counts.duplicate} />
-            </Col>
-            <Col xs={12} md={6}>
-              <StatCard label="Soft matches" value={counts.soft} />
-            </Col>
-            <Col xs={12} md={6}>
-              <StatCard label="Skipped zeros" value={counts.skip} />
-            </Col>
-          </Row>
+          <div className="stats-grid">
+            <StatCard label="New" value={counts.new} caption="Will be added" />
+            <StatCard label="Duplicates" value={counts.duplicate} caption="Already in the ledger" />
+            <StatCard label="Soft matches" value={counts.soft} caption="Same date, amount, payee" />
+            <StatCard label="Skipped" value={counts.skip} caption="Zero-amount rows" />
+          </div>
           <SectionCard>
             <Checkbox checked={includeSoft} onChange={(e) => setIncludeSoft(e.target.checked)}>
-              Import soft matches too
+              Also import soft matches
             </Checkbox>
             <Button
               type="primary"
@@ -151,25 +124,25 @@ export function ImportPage({
                   ),
                 },
                 { title: "Amount", align: "right", width: 140, render: (_, item) => <Money value={item.row.amount} /> },
-                { title: "Why", render: (_, item) => item.reason || "—" },
+                { title: "Note", render: (_, item) => item.reason || "—" },
               ]}
             />
             {preview!.length > 80 && (
               <Typography.Paragraph type="secondary" style={{ padding: 12 }}>
-                Showing first 80 of {preview!.length} rows.
+                Showing the first 80 of {preview!.length} rows.
               </Typography.Paragraph>
             )}
           </SectionCard>
         </>
       )}
 
-      <SectionCard title="Past imports" padded={false}>
+      <SectionCard title="Earlier imports" padded={false}>
         <Table
           size="middle"
           rowKey="id"
           dataSource={imports}
           pagination={false}
-          locale={{ emptyText: <EmptyState title="Nothing imported yet" /> }}
+          locale={{ emptyText: <EmptyState title="No imports yet" body="Drop a CSV below to get started." /> }}
           columns={[
             { title: "File", dataIndex: "fileName" },
             { title: "When", render: (_, item) => new Date(item.importedAt).toLocaleString("en-GB") },
@@ -178,6 +151,25 @@ export function ImportPage({
             { title: "Skipped", dataIndex: "skipped" },
           ]}
         />
+      </SectionCard>
+
+      <SectionCard title="Add a CSV">
+        <div className="import-drop">
+          <Upload.Dragger
+            accept=".csv,.CSV,text/csv"
+            showUploadList={false}
+            beforeUpload={(file) => {
+              void handleFile(file);
+              return false;
+            }}
+          >
+            <p className="ant-upload-drag-icon">
+              <InboxOutlined />
+            </p>
+            <p className="ant-upload-text">Drop your Umsatz CSV here</p>
+            <p className="ant-upload-hint">or click to choose a file{fileName ? ` · ${fileName}` : ""}</p>
+          </Upload.Dragger>
+        </div>
       </SectionCard>
     </>
   );

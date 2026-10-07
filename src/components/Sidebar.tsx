@@ -1,5 +1,6 @@
 import {
   FileTextOutlined,
+  GoldOutlined,
   HomeOutlined,
   PieChartOutlined,
   SettingOutlined,
@@ -15,15 +16,16 @@ import { APP_NAME, APP_TAGLINE } from "../brand";
 const ITEMS = [
   {
     type: "group" as const,
-    label: "Home",
-    children: [{ key: PATHS.overview, icon: <HomeOutlined />, label: "Overview" }],
+    label: "Today",
+    children: [{ key: PATHS.overview, icon: <HomeOutlined />, label: "Home" }],
   },
   {
     type: "group" as const,
-    label: "Activity",
+    label: "Money in & out",
     children: [
-      { key: PATHS.transactions, icon: <UnorderedListOutlined />, label: "Transactions" },
+      { key: PATHS.transactions, icon: <UnorderedListOutlined />, label: "Bookings" },
       { key: PATHS.cash, icon: <WalletOutlined />, label: "Cash" },
+      { key: PATHS.gold, icon: <GoldOutlined />, label: "Gold" },
     ],
   },
   {
@@ -31,7 +33,7 @@ const ITEMS = [
     label: "Plan",
     children: [
       { key: PATHS.budgets, icon: <PieChartOutlined />, label: "Budgets" },
-      { key: PATHS.report, icon: <TableOutlined />, label: "Year sheet" },
+      { key: PATHS.report, icon: <TableOutlined />, label: "Year" },
     ],
   },
   {

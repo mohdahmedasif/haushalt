@@ -5,6 +5,7 @@ export type PersonRole = "self" | "spouse" | "family" | "borrower" | "merchant";
 export type ViewId =
   | "overview"
   | "cash"
+  | "gold"
   | "transactions"
   | "import"
   | "budgets"
@@ -12,7 +13,32 @@ export type ViewId =
   | "contracts"
   | "report";
 
-export type CashMovementType = "opening" | "atm_in" | "cash_in" | "cash_out";
+export type CashMovementType = "opening" | "atm_in" | "cash_in" | "cash_out" | "bank_out";
+
+export type GoldForm = "bar" | "coin" | "jewelry" | "other";
+
+export interface GoldPiece {
+  id: string;
+  grams: number;
+  purity: string;
+  form: GoldForm;
+  note: string;
+}
+
+export interface GoldLot {
+  id: string;
+  purchasedAt: string;
+  grams: number;
+  purity: string;
+  form: GoldForm;
+  dealer: string;
+  invoiceRef: string;
+  totalPaid: number;
+  pricePerGram: number;
+  note: string;
+  pieces: GoldPiece[];
+  createdAt: string;
+}
 
 export interface Category {
   id: string;
@@ -23,6 +49,8 @@ export interface Category {
   sort: number;
   /** Exclude from income/expense totals (internal transfers, ignored rows). */
   excludeFromBudget: boolean;
+  /** Include this category as a row on the year report sheet. */
+  showInReport: boolean;
 }
 
 export interface CategoryRule {
@@ -70,7 +98,9 @@ export interface Transaction {
   notes: string;
   loanPersonId: string | null;
   loanDirection: "lent" | "repaid" | null;
-  /** Repayment booking points at the lent origin. Origins keep this null. */
+  /** Outgoing only: how much of this booking someone pays back (refund, employer, person). 0 = all mine. */
+  reimburseAmount: number;
+  /** Incoming payback points at the outgoing booking it reimburses. */
   loanOriginId: string | null;
   importId: string | null;
   source: "bank" | "cash";

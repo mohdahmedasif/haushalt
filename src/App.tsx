@@ -8,6 +8,7 @@ import type {
   CashMovement,
   Category,
   CategoryRule,
+  GoldLot,
   ImportBatch,
   Person,
   Transaction,
@@ -18,6 +19,7 @@ import { ImportPage } from "./pages/Import";
 import { BudgetsPage } from "./pages/Budgets";
 import { RulesPage } from "./pages/Rules";
 import { CashPage } from "./pages/Cash";
+import { GoldPage } from "./pages/Gold";
 import { ContractsPage } from "./pages/Contracts";
 import { ReportPage } from "./pages/Report";
 import { SetupWizard } from "./pages/SetupWizard";
@@ -37,13 +39,14 @@ export function App() {
   const [openingBalance, setOpeningBalance] = useState(0);
   const [onboarded, setOnboarded] = useState(true);
   const [cashMovements, setCashMovements] = useState<CashMovement[]>([]);
+  const [goldLots, setGoldLots] = useState<GoldLot[]>([]);
   const [contractRows, setContractRows] = useState<DetectedContract[]>([]);
   const [contractProvider, setContractProvider] = useState("local-pattern-model");
   const [contractsBusy, setContractsBusy] = useState(false);
   const { month, setMonth } = useMonth();
 
   const reload = useCallback(async () => {
-    const [tx, cats, ppl, rls, imps, cash, account, contracts] = await Promise.all([
+    const [tx, cats, ppl, rls, imps, cash, account, contracts, gold] = await Promise.all([
       api.transactions(),
       api.categories(),
       api.people(),
@@ -52,6 +55,7 @@ export function App() {
       api.cash(),
       api.account(),
       api.contracts(),
+      api.gold(),
     ]);
     setTransactions(tx);
     setCategories(cats);
@@ -64,6 +68,7 @@ export function App() {
     setOpeningBalance(account.openingBalance);
     setOnboarded(account.onboarded);
     setCashMovements(cash.movements);
+    setGoldLots(gold.lots);
     setContractRows(contracts.contracts);
     setContractProvider(contracts.provider);
     setReady(true);
@@ -79,7 +84,7 @@ export function App() {
   if (!ready) {
     return (
       <div className="splash">
-        <Spin size="large" tip="Opening your ledger…">
+        <Spin size="large" tip="Opening Haushalt…">
           <div style={{ minHeight: 48 }} />
         </Spin>
       </div>
@@ -95,10 +100,10 @@ export function App() {
       <div className="offline">
         <div className="offline-card">
           <Typography.Title level={3} style={{ fontFamily: "var(--font-serif)" }}>
-            API is offline
+            Haushalt is offline
           </Typography.Title>
           <Typography.Paragraph>
-            Start the app with <Typography.Text code>npm run dev</Typography.Text> in the app folder.
+            Start the app with <Typography.Text code>npm run dev</Typography.Text>, or with Docker Compose.
           </Typography.Paragraph>
           <Alert type="error" message={error} />
         </div>
@@ -118,6 +123,7 @@ export function App() {
               categories={categories}
               cashOnHand={cashBalance}
               cashMovements={cashMovements}
+              goldLots={goldLots}
               bankBalance={bankBalance}
               bankBalanceAsOf={bankBalanceAsOf}
               contracts={contractRows}
@@ -135,6 +141,34 @@ export function App() {
                 await api.addCash(body);
                 await reload();
               }}
+              onPatch={async (id, body) => {
+                await api.patchCash(id, body);
+                await reload();
+              }}
+              onDelete={async (id) => {
+                await api.deleteCash(id);
+                await reload();
+              }}
+            />
+          }
+        />
+        <Route
+          path="/gold"
+          element={
+            <GoldPage
+              lots={goldLots}
+              onAdd={async (body) => {
+                await api.addGold(body);
+                await reload();
+              }}
+              onPatch={async (id, body) => {
+                await api.patchGold(id, body);
+                await reload();
+              }}
+              onDelete={async (id) => {
+                await api.deleteGold(id);
+                await reload();
+              }}
             />
           }
         />
@@ -146,10 +180,19 @@ export function App() {
               transactions={transactions}
               categories={categories}
               people={people}
+              cashMovements={cashMovements}
               openingBalance={openingBalance}
               onMonthChange={setMonth}
               onPatch={async (id, patch) => {
                 await api.patchTransaction(id, patch);
+                await reload();
+              }}
+              onPatchCash={async (id, body) => {
+                await api.patchCash(id, body);
+                await reload();
+              }}
+              onDeleteCash={async (id) => {
+                await api.deleteCash(id);
                 await reload();
               }}
             />
@@ -176,12 +219,17 @@ export function App() {
               month={month}
               categories={categories}
               transactions={transactions}
-              onSave={async (id, budget) => {
-                await api.patchCategory(id, budget);
+              rules={rules}
+              onSave={async (id, patch) => {
+                await api.patchCategory(id, patch);
                 await reload();
               }}
               onAdd={async (body) => {
                 await api.addCategory(body);
+                await reload();
+              }}
+              onDelete={async (id, moveTo) => {
+                await api.deleteCategory(id, moveTo);
                 await reload();
               }}
             />

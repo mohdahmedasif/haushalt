@@ -25,6 +25,39 @@ export interface LoanOriginStatus {
   installments: Transaction[];
 }
 
+/** Money Lent part of a booking — loans to a person are always paid back in full by default. */
+export function loanShare(tx: Pick<Transaction, "amount" | "categoryId" | "splits">): number {
+  if (tx.amount >= 0) return 0;
+  if (tx.splits.length) {
+    return round2(
+      tx.splits.filter((line) => line.categoryId === "loan_out").reduce((sum, line) => sum + Math.abs(line.amount), 0),
+    );
+  }
+  return tx.categoryId === "loan_out" ? Math.abs(tx.amount) : 0;
+}
+
+/** "lent" for loans to a person (repayment wording), "back" for refunds and reimbursements. */
+export type OriginKind = "lent" | "back";
+
+export function originKind(tx: Transaction): OriginKind {
+  return loanShare(tx) > 0 ? "lent" : "back";
+}
+
+/** Keeps reimburseAmount / loanDirection consistent with amount, category and links. */
+export function normalizeReimburse<T extends Transaction>(tx: T): T {
+  if (tx.amount >= 0) {
+    return {
+      ...tx,
+      reimburseAmount: 0,
+      loanDirection: tx.loanOriginId || tx.categoryId === "loan_in" ? "repaid" : null,
+    };
+  }
+  let amount = Math.max(0, Number(tx.reimburseAmount) || 0);
+  if (amount === 0) amount = loanShare(tx);
+  amount = round2(Math.min(amount, Math.abs(tx.amount)));
+  return { ...tx, reimburseAmount: amount, loanDirection: amount > 0 ? "lent" : null, loanOriginId: null };
+}
+
 const LENT_PURPOSE = /\b(loan|lending|lend)\b/i;
 const REPAID_PURPOSE = /\b(payback|pay back|repay|loan amount|remaining amount|second half)\b/i;
 const NOT_A_LOAN = /\b(badminton|splitwise|chatgpt|chat gpt|uno|danke|sim bill)\b/i;
@@ -47,41 +80,44 @@ export function repairLoanPatch(
   _personHasLent: boolean,
 ): Partial<Transaction> | null {
   if (tx.loanOriginId || tx.splits.length) return null;
-  if (NOT_A_LOAN.test(tx.purpose) && (tx.categoryId === "loan_out" || tx.categoryId === "loan_in" || tx.loanDirection)) {
+  if (NOT_A_LOAN.test(tx.purpose) && (tx.categoryId === "loan_out" || tx.categoryId === "loan_in")) {
     return {
       categoryId: tx.amount > 0 ? "reimbursement" : "miscellaneous",
       loanDirection: null,
       loanOriginId: null,
+      reimburseAmount: 0,
     };
   }
   if (!tx.categoryId && looksLikeLoanOut(tx)) {
-    return { categoryId: "loan_out", loanDirection: "lent", loanOriginId: null };
+    return { categoryId: "loan_out", loanDirection: "lent", loanOriginId: null, reimburseAmount: Math.abs(tx.amount) };
   }
   return null;
 }
 
+/** How much of an outgoing booking is to be reimbursed. */
 export function lentPortion(tx: Transaction): number {
-  if (tx.excluded) return 0;
-  if (tx.splits.length) {
-    return round2(
-      tx.splits.filter((line) => line.categoryId === "loan_out").reduce((sum, line) => sum + Math.abs(line.amount), 0),
-    );
-  }
-  if (tx.categoryId === "loan_out" || tx.loanDirection === "lent") return Math.abs(tx.amount);
-  return 0;
+  if (tx.excluded || tx.amount >= 0) return 0;
+  return round2(Math.min(Math.max(0, tx.reimburseAmount || 0), Math.abs(tx.amount)));
 }
 
+function personLentPortion(tx: Transaction): number {
+  return originKind(tx) === "lent" ? lentPortion(tx) : 0;
+}
+
+/** An incoming booking linked as a payback counts in full. */
 export function repaidPortion(tx: Transaction): number {
-  if (tx.excluded) return 0;
-  if (tx.splits.length) {
-    return round2(
-      tx.splits.filter((line) => line.categoryId === "loan_in").reduce((sum, line) => sum + Math.abs(line.amount), 0),
-    );
+  if (tx.excluded || tx.amount <= 0 || !tx.loanOriginId) return 0;
+  return Math.abs(tx.amount);
+}
+
+/** Received paybacks per outgoing booking id. */
+export function paybacksByOrigin(ledger: Transaction[]): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const tx of ledger) {
+    const portion = repaidPortion(tx);
+    if (portion > 0 && tx.loanOriginId) map.set(tx.loanOriginId, round2((map.get(tx.loanOriginId) ?? 0) + portion));
   }
-  if (tx.categoryId === "loan_in" || tx.loanDirection === "repaid" || tx.loanOriginId) {
-    return Math.abs(tx.amount);
-  }
-  return 0;
+  return map;
 }
 
 export function isLoanOrigin(tx: Transaction): boolean {
@@ -124,21 +160,43 @@ export function matchingOpenOrigins(
 
 /** All still-open lent bookings — for manually attaching a return. Matching names first. */
 export function openOriginsForAttach(
-  row: Pick<Transaction, "counterparty" | "iban" | "id">,
+  row: Pick<Transaction, "counterparty" | "iban" | "id"> & Partial<Pick<Transaction, "valueDate" | "bookingDate">>,
   people: Person[] = [],
   ledger: Transaction[],
+  kind?: OriginKind,
+  includeClosed = false,
 ): LoanOriginStatus[] {
   const matchingIds = new Set(matchingOpenOrigins(row, people, ledger).map((hit) => hit.origin.id));
+  const rowDate = row.valueDate || row.bookingDate || "";
   return allLoanOrigins(ledger)
     .filter((origin) => origin.id !== row.id)
+    .filter((origin) => !kind || originKind(origin) === kind)
+    .filter((origin) => {
+      const date = origin.valueDate || origin.bookingDate || "";
+      return !rowDate || !date || date <= rowDate;
+    })
     .map((origin) => loanOriginStatus(origin, ledger))
-    .filter((status) => status.outstanding > 0.005)
+    .filter((status) => status.outstanding > 0.005 || (includeClosed && acceptsLateReimbursement(status)))
     .sort((a, b) => {
       const am = matchingIds.has(a.origin.id) ? 0 : 1;
       const bm = matchingIds.has(b.origin.id) ? 0 : 1;
       if (am !== bm) return am - bm;
       return (b.origin.valueDate || b.origin.bookingDate).localeCompare(a.origin.valueDate || a.origin.bookingDate);
     });
+}
+
+/** A closed reimbursement can still take a late refund, up to the booking amount. */
+export function acceptsLateReimbursement(status: LoanOriginStatus): boolean {
+  return originKind(status.origin) === "back" && status.repaid < Math.abs(status.origin.amount) - 0.005;
+}
+
+/** Reimburse amount after linking `incoming` — a closed booking grows to cover a late refund. */
+export function reimburseAfterLink(origin: Transaction, incoming: Transaction, ledger: Transaction[]): number {
+  const received = ledger
+    .filter((tx) => tx.loanOriginId === origin.id && tx.id !== incoming.id)
+    .reduce((sum, tx) => sum + repaidPortion(tx), 0);
+  const next = round2(Math.min(Math.abs(origin.amount), received + Math.abs(incoming.amount)));
+  return Math.max(origin.reimburseAmount, next);
 }
 
 /** Incoming bookings you can attach as returns for this lent origin. */
@@ -161,12 +219,19 @@ export function candidateReturnBookings(origin: Transaction, ledger: Transaction
     });
 }
 
+/** Category a linked incoming booking gets: Paid back for loans, Reimbursed for everything else. */
+export function paybackCategory(origin: Transaction): string {
+  return originKind(origin) === "lent" ? "loan_in" : "reimbursement";
+}
+
+export const PAYBACK_CATEGORIES = new Set(["loan_in", "reimbursement"]);
+
 export function attachReturnPatch(origin: Transaction): Partial<Transaction> {
   return {
     loanOriginId: origin.id,
-    categoryId: "loan_in",
+    categoryId: paybackCategory(origin),
     loanDirection: "repaid",
-    loanPersonId: origin.loanPersonId,
+    loanPersonId: originKind(origin) === "lent" ? origin.loanPersonId : null,
     splits: [],
   };
 }
@@ -175,33 +240,45 @@ export function detachReturnPatch(tx: Transaction): Partial<Transaction> {
   return {
     loanOriginId: null,
     loanDirection: null,
-    categoryId: tx.splits.length ? tx.categoryId : null,
+    categoryId: tx.splits.length || !PAYBACK_CATEGORIES.has(tx.categoryId ?? "") ? tx.categoryId : null,
   };
 }
 
-export function isWaitingToAttach(tx: Transaction, ledger: Transaction[], people: Person[]): boolean {
-  if (tx.amount <= 0 || tx.excluded || tx.loanOriginId) return false;
-  const assignedElsewhere =
-    tx.categoryId &&
-    tx.categoryId !== "loan_in" &&
-    !tx.splits.some((line) => line.categoryId === "loan_in");
-  if (assignedElsewhere) return false;
-  return openOriginsForAttach(tx, people, ledger).length > 0;
+/** Incoming money that looks like it pays back a pending booking of this kind (or any kind). */
+export function isWaitingToAttach(tx: Transaction, ledger: Transaction[], people: Person[], kind?: OriginKind): boolean {
+  if (tx.amount <= 0 || tx.excluded || tx.loanOriginId || tx.splits.length) return false;
+  if (tx.categoryId) {
+    if (tx.categoryId === "loan_in") {
+      if (kind === "back") return false;
+      kind = "lent";
+    } else if (tx.categoryId === "reimbursement") {
+      if (kind === "lent") return false;
+      kind = "back";
+    } else {
+      return false;
+    }
+  }
+  return openOriginsForAttach(tx, people, ledger, kind).length > 0;
 }
 
-export function isOpenLoan(tx: Transaction, ledger: Transaction[]): boolean {
+export function isOpenLoan(tx: Transaction, ledger: Transaction[], kind?: OriginKind): boolean {
   if (!isLoanOrigin(tx)) return false;
+  if (kind && originKind(tx) !== kind) return false;
   return loanOriginStatus(tx, ledger).outstanding > 0.005;
 }
 
 export function categoryPatch(categoryId: string | null): Partial<Transaction> {
   if (categoryId === "loan_out") {
-    return { categoryId, splits: [], loanDirection: "lent", loanOriginId: null };
+    return { categoryId, splits: [], loanOriginId: null };
   }
-  if (categoryId === "loan_in") {
-    return { categoryId, splits: [], loanDirection: "repaid" };
+  if (categoryId === "loan_in" || categoryId === "reimbursement") {
+    return { categoryId, splits: [] };
   }
-  return { categoryId, splits: [], loanDirection: null, loanOriginId: null, loanPersonId: null };
+  return { categoryId, splits: [], loanOriginId: null, loanPersonId: null };
+}
+
+export function reimbursePatch(amount: number): Partial<Transaction> {
+  return { reimburseAmount: Math.max(0, round2(amount)) };
 }
 
 export function splitLoanPatch(
@@ -209,14 +286,12 @@ export function splitLoanPatch(
   splits: Transaction["splits"],
   loanPersonId: string | null,
 ): Partial<Transaction> {
-  const lent = splits.some((line) => line.categoryId === "loan_out");
-  const repaid = splits.some((line) => line.categoryId === "loan_in");
+  const personLoan = splits.some((line) => line.categoryId === "loan_out");
   return {
     splits,
     categoryId: null,
-    loanDirection: lent ? "lent" : repaid ? "repaid" : null,
-    loanOriginId: lent ? null : tx.loanOriginId,
-    loanPersonId: lent || repaid ? loanPersonId : null,
+    loanOriginId: tx.amount < 0 ? null : tx.loanOriginId,
+    loanPersonId: personLoan ? loanPersonId : null,
   };
 }
 
@@ -250,15 +325,15 @@ export function buildLending(people: Person[], transactions: Transaction[]): Len
   return people
     .map((person) => {
       const origins = allLoanOrigins(transactions).filter(
-        (tx) => tx.loanPersonId === person.id || belongsToPerson(tx, person),
+        (tx) => personLentPortion(tx) > 0 && (tx.loanPersonId === person.id || belongsToPerson(tx, person)),
       );
       const originIds = new Set(origins.map((tx) => tx.id));
       const installments = transactions.filter((tx) => tx.loanOriginId && originIds.has(tx.loanOriginId));
       const lines: LendingLine[] = [
-        ...origins.map((tx) => line(tx, "lent", lentPortion(tx))),
+        ...origins.map((tx) => line(tx, "lent", personLentPortion(tx))),
         ...installments.map((tx) => line(tx, "repaid", repaidPortion(tx))),
       ].sort((a, b) => a.date.localeCompare(b.date));
-      const lent = round2(origins.reduce((sum, tx) => sum + lentPortion(tx), 0));
+      const lent = round2(origins.reduce((sum, tx) => sum + personLentPortion(tx), 0));
       const repaid = round2(installments.reduce((sum, tx) => sum + repaidPortion(tx), 0));
       return {
         person,

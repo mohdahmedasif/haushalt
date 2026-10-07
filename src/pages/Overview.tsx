@@ -1,8 +1,9 @@
 import { useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { Button, Col, Row, Typography } from "antd";
+import { Button, Typography } from "antd";
 import { PageHeader } from "../ui/PageHeader";
 import { Money } from "../ui/Money";
+import { formatEur } from "../lib/money";
 import { StatCard } from "../ui/StatCard";
 import { SectionCard } from "../ui/SectionCard";
 import { EmptyState } from "../ui/EmptyState";
@@ -14,7 +15,8 @@ import { buildForecast } from "../lib/forecast";
 import { buildInsights } from "../lib/insights";
 import { withMonth } from "../hooks/useMonth";
 import type { DetectedContract } from "../lib/contracts";
-import type { CashMovement, Category, Transaction } from "../types";
+import type { CashMovement, Category, GoldLot, Transaction } from "../types";
+import { formatGrams, goldTotals } from "../lib/gold";
 
 export function OverviewPage({
   month,
@@ -22,6 +24,7 @@ export function OverviewPage({
   categories,
   cashOnHand,
   cashMovements,
+  goldLots = [],
   bankBalance,
   bankBalanceAsOf,
   contracts,
@@ -31,6 +34,7 @@ export function OverviewPage({
   categories: Category[];
   cashOnHand: number;
   cashMovements: CashMovement[];
+  goldLots?: GoldLot[];
   bankBalance: number | null;
   bankBalanceAsOf: string | null;
   contracts: DetectedContract[];
@@ -49,6 +53,7 @@ export function OverviewPage({
   const hasAtm = cashMovements.some((m) => m.type === "atm_in" && m.month === month);
   const hasCashSpend = cashMovements.some((m) => m.type === "cash_out" && m.month === month);
   const needCashSpend = hasAtm && !hasCashSpend;
+  const gold = goldTotals(goldLots);
   const today = currentMonth();
   const trend = monthsBetween(addMonths(month, -5), month).map((m) => ({
     label: formatMonth(m).replace(/ \d{4}$/, "").slice(0, 3),
@@ -79,7 +84,7 @@ export function OverviewPage({
           </Button>
         }
       >
-        {formatMonth(month)} · {monthTx.length} bookings
+        {formatMonth(month)} · {monthTx.length} booking{monthTx.length === 1 ? "" : "s"}
       </PageHeader>
 
       <div className="hero-row">
@@ -93,115 +98,111 @@ export function OverviewPage({
           </div>
           <div className="stat-caption">
             {forecast.nextSalaryDate
-              ? `${forecast.daysUntilSalary} days · ${formatDay(forecast.nextSalaryDate)}`
-              : "No salary pattern yet"}
+              ? `${forecast.daysUntilSalary} day${forecast.daysUntilSalary === 1 ? "" : "s"} left · next salary ${formatDay(forecast.nextSalaryDate)}`
+              : "No salary pattern detected yet"}
           </div>
         </div>
       </div>
 
-      <Row gutter={[16, 16]}>
-        <Col xs={24} md={8}>
-          <StatCard
-            label="This month leftover"
-            value={<Money value={summary.leftover} />}
-            caption={`Income ${summary.income.toLocaleString("de-DE")} · spend ${summary.expense.toLocaleString("de-DE")}`}
-          />
-        </Col>
-        <Col xs={24} md={8}>
-          <StatCard
-            label="Uncategorized"
-            value={uncat}
-            caption={uncat ? "Open Transactions to assign" : "All tagged this month"}
-            onClick={() => navigate(withMonth("/transactions", month, { uncat: "1" }))}
-          />
-        </Col>
-        <Col xs={24} md={8}>
-          <StatCard
-            label="Cash wallet"
-            value={<Money value={cashOnHand} />}
-            caption={
-              needCashSpend
-                ? "ATM cash this month — record what you spent it on"
-                : "ATM in, cash spend out"
-            }
-            onClick={() => navigate(withMonth("/cash", month))}
-          />
-        </Col>
-      </Row>
+      <div className="stats-grid">
+        <StatCard
+          label="This month leftover"
+          value={<Money value={summary.leftover} />}
+          caption={`In ${formatEur(summary.income)} · out ${formatEur(summary.expense)}`}
+        />
+        <StatCard
+          label="Needs a category"
+          value={uncat}
+          caption={uncat ? "Tap to tag these bookings" : "Everything tagged this month"}
+          onClick={() => navigate(withMonth("/transactions", month, { uncat: "1" }))}
+        />
+        <StatCard
+          label="Cash on hand"
+          value={<Money value={cashOnHand} />}
+          caption={
+            needCashSpend
+              ? "ATM cash this month — say what you spent it on"
+              : "ATM in, cash spend out"
+          }
+          onClick={() => navigate(withMonth("/cash", month))}
+        />
+        <StatCard
+          label="Gold"
+          value={formatGrams(gold.grams)}
+          caption={
+            gold.lots
+              ? `${gold.lots} purchase${gold.lots === 1 ? "" : "s"} · paid ${formatEur(gold.paid)}`
+              : "Track bars, coins, jewelry"
+          }
+          onClick={() => navigate(withMonth("/gold", month))}
+        />
+      </div>
 
-      <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
-        <Col xs={24} lg={14}>
-          <SectionCard title="Leftover last 6 months">
-            <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
-              Income minus expenses. {today === month ? "This month is still open." : null}
-            </Typography.Paragraph>
-            <TrendChart data={trend} />
-          </SectionCard>
-        </Col>
-        <Col xs={24} lg={10}>
-          <SectionCard title="Spend mix">
-            {mix.length ? (
-              <MixChart data={mix} />
-            ) : (
-              <EmptyState title="No expenses yet" body="Import a CSV or wait for bookings this month." />
-            )}
-          </SectionCard>
-        </Col>
-      </Row>
+      <div className="page-hero split-row">
+        <SectionCard title="Leftover · last 6 months">
+          <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
+            Income minus expenses{today === month ? " · this month is still open" : ""}.
+          </Typography.Paragraph>
+          <TrendChart data={trend} />
+        </SectionCard>
+        <SectionCard title="Where money went">
+          {mix.length ? (
+            <MixChart data={mix} />
+          ) : (
+            <EmptyState title="No expenses yet" body="Import a bank CSV, or wait for bookings this month." />
+          )}
+        </SectionCard>
+      </div>
 
-      <Row gutter={[16, 16]}>
-        <Col xs={24} lg={14}>
-          <SectionCard
-            title="Upcoming until payday"
-            extra={
-              <Button type="link" onClick={() => navigate(withMonth("/contracts", month))}>
-                Open contracts
-              </Button>
-            }
-          >
-            {forecast.upcoming.length === 0 ? (
-              <EmptyState
-                title="Nothing left before payday"
-                body="Contracts are already booked this cycle, or none were detected."
-              />
-            ) : (
-              <>
-                {forecast.upcoming.map((item) => (
-                  <div className="upcoming-row" key={item.name + item.date}>
-                    <div>
-                      <div>{item.name}</div>
-                      <Typography.Text type="secondary">{formatDay(item.date)}</Typography.Text>
-                    </div>
-                    <Money value={item.amount} />
+      <div className="page-hero split-row">
+        <SectionCard
+          title="Coming before payday"
+          extra={
+            <Button type="link" onClick={() => navigate(withMonth("/contracts", month))}>
+              All contracts
+            </Button>
+          }
+        >
+          {forecast.upcoming.length === 0 ? (
+            <EmptyState
+              title="Nothing due before payday"
+              body="Either contracts already booked this cycle, or none were found yet."
+            />
+          ) : (
+            <>
+              {forecast.upcoming.map((item) => (
+                <div className="upcoming-row" key={item.name + item.date}>
+                  <div>
+                    <div>{item.name}</div>
+                    <Typography.Text type="secondary">{formatDay(item.date)}</Typography.Text>
                   </div>
-                ))}
-                <Typography.Text type="secondary">
-                  Remaining outflows <Money value={-forecast.remainingOutflows} />
-                </Typography.Text>
-              </>
-            )}
-          </SectionCard>
-        </Col>
-        <Col xs={24} lg={10}>
-          <SectionCard title="Watch">
-            {insights.notes.length === 0 ? (
-              <EmptyState title="All quiet" body="No tax or investment notes for this year." />
-            ) : (
-              <div className="insight-list">
-                {insights.notes.slice(0, 6).map((note) => (
-                  <div className="insight-item" key={note.id}>
-                    <span className={`insight-chip ${note.severity}`}>{note.severity}</span>
-                    <div>
-                      <div className="insight-title">{note.title}</div>
-                      <div className="insight-body">{note.body}</div>
-                    </div>
+                  <Money value={item.amount} />
+                </div>
+              ))}
+              <Typography.Text type="secondary">
+                Still to go out <Money value={-forecast.remainingOutflows} />
+              </Typography.Text>
+            </>
+          )}
+        </SectionCard>
+        <SectionCard title="Worth a look">
+          {insights.notes.length === 0 ? (
+            <EmptyState title="Nothing flagged" body="No tax or investment notes for this year." />
+          ) : (
+            <div className="insight-list">
+              {insights.notes.slice(0, 6).map((note) => (
+                <div className="insight-item" key={note.id}>
+                  <span className={`insight-chip ${note.severity}`}>{note.severity}</span>
+                  <div>
+                    <div className="insight-title">{note.title}</div>
+                    <div className="insight-body">{note.body}</div>
                   </div>
-                ))}
-              </div>
-            )}
-          </SectionCard>
-        </Col>
-      </Row>
+                </div>
+              ))}
+            </div>
+          )}
+        </SectionCard>
+      </div>
     </>
   );
 }
@@ -215,13 +216,13 @@ function BankCard({
 }) {
   return (
     <>
-      <div className="stat-label">Bank</div>
+      <div className="stat-label">Girokonto</div>
       <div className="stat-value hero">
         <Money value={value ?? 0} />
       </div>
       <div className="stat-caption">
         {asOf ? `As of ${formatDay(asOf.slice(0, 10))}` : "No bank bookings yet"}
-        {" · opening + imported bookings"}
+        {" · opening balance + imports"}
       </div>
     </>
   );

@@ -31,12 +31,13 @@ export function buildFingerprint(input: {
 
 export function buildSoftKey(input: {
   bookingDate: string;
+  valueDate?: string;
   counterparty: string;
   iban: string;
   amount: number;
 }): string {
   return [
-    input.bookingDate,
+    input.valueDate || input.bookingDate,
     normalize(input.counterparty),
     normalize(input.iban),
     String(cents(input.amount)),

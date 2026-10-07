@@ -1,5 +1,5 @@
 import type { CategoryRule, ParsedRow, Person, Transaction } from "../types";
-import { looksLikeLoanIn, looksLikeLoanOut, matchingOpenOrigins } from "./lending";
+import { looksLikeLoanIn, looksLikeLoanOut, matchingOpenOrigins, paybackCategory } from "./lending";
 import { addMonths, monthKey } from "./dates";
 
 export interface Suggestion {
@@ -72,6 +72,22 @@ export function suggestCategory(
     };
   }
 
+  if (
+    row.amount > 0 &&
+    (row.bookingText.toUpperCase().includes("BARGELDEINZAHLUNG") ||
+      row.bookingText.toUpperCase().includes("EINZAHLUNG BAR") ||
+      row.purpose.toUpperCase().includes("BARGELDEINZAHLUNG"))
+  ) {
+    return {
+      categoryId: "from_cash",
+      personId: null,
+      loanDirection: null,
+      spreadMonths: 1,
+      confidence: "high",
+      reason: "Cash deposit — leaves the cash wallet",
+    };
+  }
+
   if (person?.role === "self") {
     return {
       categoryId: "internal",
@@ -103,13 +119,13 @@ export function suggestCategory(
     if (openHits.length === 1 && looksLikeLoanIn(row)) {
       const hit = openHits[0];
       return {
-        categoryId: "loan_in",
+        categoryId: paybackCategory(hit.origin),
         personId: hit.origin.loanPersonId ?? person?.id ?? null,
         loanDirection: "repaid",
         loanOriginId: hit.origin.id,
         spreadMonths: 1,
         confidence: "high",
-        reason: "Installment on money still open — attached to the lent booking",
+        reason: "Repayment of money lent — linked automatically",
       };
     }
     if (openHits.length > 0) {
@@ -294,7 +310,7 @@ const INCOME_CATEGORIES = new Set([
   "loan_in",
 ]);
 
-const TRANSFER_CATEGORIES = new Set(["internal", "to_cash", "loan_out", "loan_in", "ignore"]);
+const TRANSFER_CATEGORIES = new Set(["internal", "to_cash", "from_cash", "loan_out", "loan_in", "ignore"]);
 
 function ruleFitsAmount(categoryId: string, amount: number): boolean {
   if (TRANSFER_CATEGORIES.has(categoryId)) return true;
@@ -308,7 +324,14 @@ export function learnRuleFrom(
   existing: CategoryRule[],
 ): CategoryRule | null {
   if (!tx.categoryId || !tx.counterparty.trim()) return null;
-  if (tx.categoryId === "loan_out" || tx.categoryId === "loan_in" || tx.categoryId === "internal" || tx.categoryId === "to_cash" || tx.categoryId === "ignore") {
+  if (
+    tx.categoryId === "loan_out" ||
+    tx.categoryId === "loan_in" ||
+    tx.categoryId === "internal" ||
+    tx.categoryId === "to_cash" ||
+    tx.categoryId === "from_cash" ||
+    tx.categoryId === "ignore"
+  ) {
     return null;
   }
   const value = tx.counterparty.trim();

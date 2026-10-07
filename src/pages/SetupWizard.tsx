@@ -13,13 +13,14 @@ function parseMoneyInput(raw: string): number {
   if (!text) throw new Error("Enter the starting Kontostand");
   if (text.includes(",")) return parseGermanAmount(text);
   const n = Number(text.replace(/\s/g, ""));
-  if (Number.isNaN(n)) throw new Error("Could not parse that amount");
+  if (Number.isNaN(n)) throw new Error("That amount could not be read");
   return Math.round(n * 100) / 100;
 }
 
 export function SetupWizard({ onDone }: { onDone: () => Promise<void> }) {
   const [step, setStep] = useState(0);
   const [amount, setAmount] = useState("");
+  const [cashAmount, setCashAmount] = useState("");
   const [date, setDate] = useState<Dayjs>(dayjs().subtract(1, "day"));
   const [fileName, setFileName] = useState("");
   const [csvText, setCsvText] = useState("");
@@ -29,9 +30,12 @@ export function SetupWizard({ onDone }: { onDone: () => Promise<void> }) {
 
   async function saveOpening(onboarded = false) {
     const openingBalance = parseMoneyInput(amount);
+    const openingCash = cashAmount.trim() ? parseMoneyInput(cashAmount) : 0;
+    if (openingCash < 0) throw new Error("Cash on hand cannot be negative");
     await api.setup({
       openingBalance,
       openingBalanceDate: date.format("YYYY-MM-DD"),
+      openingCash,
       onboarded,
     });
     return openingBalance;
@@ -90,12 +94,12 @@ export function SetupWizard({ onDone }: { onDone: () => Promise<void> }) {
           <div className="wizard-kicker">{APP_NAME}</div>
         </div>
         <Typography.Title level={2} className="wizard-title">
-          Set up your ledger
+          Welcome to {APP_NAME}
         </Typography.Title>
         <Steps
           current={step}
           size="small"
-          items={[{ title: "Welcome" }, { title: "Balance" }, { title: "Statement" }]}
+          items={[{ title: "Welcome" }, { title: "Balances" }, { title: "Statement" }]}
           style={{ marginBottom: 28 }}
         />
 
@@ -104,11 +108,11 @@ export function SetupWizard({ onDone }: { onDone: () => Promise<void> }) {
         {step === 0 && (
           <div className="wizard-body">
             <Typography.Paragraph>
-              Enter the Kontostand from the day before your statement starts, then import the CSV.
-              Home is opening balance plus every imported booking.
+              Start with your Girokonto balance from the day before the statement, any cash already in your wallet, then
+              import the CSV. Home shows opening bank balance plus every imported booking.
             </Typography.Paragraph>
             <Button type="primary" size="large" onClick={() => setStep(1)}>
-              Begin
+              Get started
             </Button>
           </div>
         )}
@@ -116,7 +120,7 @@ export function SetupWizard({ onDone }: { onDone: () => Promise<void> }) {
         {step === 1 && (
           <div className="wizard-body">
             <Typography.Paragraph type="secondary">
-              Use the bank balance on this date — the day before the first booking in your CSV.
+              Use the Kontostand on this date — the day before the first booking in your CSV.
             </Typography.Paragraph>
             <label className="wizard-label">Date of Kontostand</label>
             <DatePicker
@@ -126,7 +130,7 @@ export function SetupWizard({ onDone }: { onDone: () => Promise<void> }) {
               style={{ width: "100%", marginBottom: 16 }}
               size="large"
             />
-            <label className="wizard-label">Starting balance</label>
+            <label className="wizard-label">Girokonto balance</label>
             <Input
               size="large"
               value={amount}
@@ -135,6 +139,20 @@ export function SetupWizard({ onDone }: { onDone: () => Promise<void> }) {
               suffix="€"
               onPressEnter={() => void nextFromBalance()}
             />
+            <label className="wizard-label" style={{ marginTop: 16 }}>
+              Cash already on hand
+            </label>
+            <Input
+              size="large"
+              value={cashAmount}
+              onChange={(e) => setCashAmount(e.target.value)}
+              placeholder="0,00"
+              suffix="€"
+              onPressEnter={() => void nextFromBalance()}
+            />
+            <Typography.Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0 }}>
+              Optional. Notes in your wallet on this date. Leave empty for 0 € — you cannot change this later.
+            </Typography.Paragraph>
             <div className="wizard-actions">
               <Button onClick={() => setStep(0)}>Back</Button>
               <Button type="primary" loading={busy} onClick={() => void nextFromBalance()}>
@@ -147,7 +165,7 @@ export function SetupWizard({ onDone }: { onDone: () => Promise<void> }) {
         {step === 2 && (
           <div className="wizard-body">
             <Typography.Paragraph type="secondary">
-              Drop the bank Umsatz CSV. You can also skip and import later.
+              Drop your bank Umsatz CSV, or skip and import later from Import.
             </Typography.Paragraph>
             <Upload.Dragger
               accept=".csv,.CSV,text/csv"
@@ -160,27 +178,20 @@ export function SetupWizard({ onDone }: { onDone: () => Promise<void> }) {
               <p className="ant-upload-drag-icon">
                 <InboxOutlined />
               </p>
-              <p className="ant-upload-text">Drop the CAMT CSV here</p>
-              <p className="ant-upload-hint">
-                {fileName ? fileName : "or click to choose a file"}
-              </p>
+              <p className="ant-upload-text">Drop the Umsatz CSV here</p>
+              <p className="ant-upload-hint">{fileName ? fileName : "or click to choose a file"}</p>
             </Upload.Dragger>
             {imported && (
               <Alert
                 type="success"
                 style={{ marginTop: 16 }}
-                message={`Added ${imported.added} bookings · ${imported.duplicates} duplicates · ${imported.skipped} skipped`}
+                message={`Added ${imported.added} · duplicates ${imported.duplicates} · skipped ${imported.skipped}`}
               />
             )}
             <div className="wizard-actions">
               <Button onClick={() => setStep(1)}>Back</Button>
               <Button onClick={() => void finish(false)}>Skip for now</Button>
-              <Button
-                type="primary"
-                loading={busy}
-                disabled={!csvText}
-                onClick={() => void finish(true)}
-              >
+              <Button type="primary" loading={busy} disabled={!csvText} onClick={() => void finish(true)}>
                 Import and open
               </Button>
             </div>

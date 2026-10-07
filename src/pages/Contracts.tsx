@@ -4,6 +4,7 @@ import { formatEur } from "../lib/money";
 import { formatDay } from "../lib/dates";
 import { PageHeader } from "../ui/PageHeader";
 import { Money } from "../ui/Money";
+import { StatCard } from "../ui/StatCard";
 import { SectionCard } from "../ui/SectionCard";
 import { CategoryTag } from "../ui/CategoryTag";
 import { EmptyState } from "../ui/EmptyState";
@@ -31,10 +32,15 @@ export function ContractsPage({
       return sum + m;
     }, 0);
 
+  const soonest = active
+    .filter((c) => c.nextExpected)
+    .slice()
+    .sort((a, b) => (a.nextExpected ?? "").localeCompare(b.nextExpected ?? ""))[0];
+
   return (
     <>
       <PageHeader
-        title="Contract folder"
+        title="Contracts"
         extra={
           <Button
             type="primary"
@@ -43,20 +49,39 @@ export function ContractsPage({
               void onRefresh().then(() => setShowAnalyze(true));
             }}
           >
-            Re-analyze
+            Refresh
           </Button>
         }
       >
-        Recurring SEPA, next debit, Fixkosten {formatEur(Math.abs(fix))}/month
-        {showAnalyze ? ` · last run: ${provider}` : ""}
+        Recurring SEPA payments. Fixkosten about {formatEur(Math.abs(fix))} per month
+        {showAnalyze ? ` · last scan: ${provider}` : ""}.
       </PageHeader>
+      <div className="page-hero cols-3">
+        <div className="hero-panel">
+          <div className="stat-label">Fixkosten / month</div>
+          <div className="stat-value hero">
+            <Money value={fix} />
+          </div>
+          <div className="stat-caption">Typical spend from active contracts</div>
+        </div>
+        <StatCard
+          label="Active"
+          value={active.length}
+          caption={`${paused.length} paused · ${ended.length} ended`}
+        />
+        <StatCard
+          label="Next debit"
+          value={soonest?.nextExpected ? formatDay(soonest.nextExpected) : "—"}
+          caption={soonest ? soonest.name : "Nothing scheduled yet"}
+        />
+      </div>
       {contracts.length === 0 && (
         <SectionCard>
-          <EmptyState title="No contracts yet" body="Import bookings, then re-analyze SEPA patterns." />
+          <EmptyState title="No contracts found" body="Import bookings first, then refresh to detect recurring SEPA." />
         </SectionCard>
       )}
       <Section title={`Active (${active.length})`} rows={active} />
-      <Section title={`Paused / unclear (${paused.length})`} rows={paused} />
+      <Section title={`Paused (${paused.length})`} rows={paused} />
       <Section title={`Ended (${ended.length})`} rows={ended} />
     </>
   );

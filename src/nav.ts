@@ -4,6 +4,7 @@ export const PATHS: Record<ViewId, string> = {
   overview: "/",
   transactions: "/transactions",
   cash: "/cash",
+  gold: "/gold",
   budgets: "/budgets",
   report: "/year",
   contracts: "/contracts",

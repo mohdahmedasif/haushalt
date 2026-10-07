@@ -6,13 +6,19 @@ import { SEED_CATEGORIES } from "../src/data/categories.ts";
 import { SEED_PEOPLE } from "../src/data/people.ts";
 import { SEED_RULES } from "../src/data/rules.ts";
 import { accountFeeMonth, feeSpreadStart, matchPerson, spreadMonthsForCategory } from "../src/lib/categorize.ts";
+import { normalizeGoldPieces, piecesFromLegacy, piecesSummary } from "../src/lib/gold.ts";
+import { normalizeReimburse } from "../src/lib/lending.ts";
 import type {
   AccountState,
   AppSettings,
   CashMovement,
   Category,
   CategoryRule,
+  GoldForm,
+  GoldLot,
+  GoldPiece,
   ImportBatch,
+  ParsedRow,
   Person,
   Transaction,
 } from "../src/types.ts";
@@ -46,7 +52,8 @@ CREATE TABLE IF NOT EXISTS categories (
   budget REAL NOT NULL,
   color TEXT NOT NULL,
   sort INTEGER NOT NULL,
-  exclude_from_budget INTEGER NOT NULL
+  exclude_from_budget INTEGER NOT NULL,
+  show_in_report INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS transactions (
   id TEXT PRIMARY KEY,
@@ -116,6 +123,20 @@ CREATE TABLE IF NOT EXISTS cash_movements (
   transaction_id TEXT,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS gold_lots (
+  id TEXT PRIMARY KEY,
+  purchased_at TEXT NOT NULL,
+  grams REAL NOT NULL,
+  purity TEXT NOT NULL,
+  form TEXT NOT NULL,
+  dealer TEXT,
+  invoice_ref TEXT,
+  total_paid REAL NOT NULL,
+  price_per_gram REAL NOT NULL,
+  note TEXT,
+  pieces TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -123,11 +144,23 @@ CREATE TABLE IF NOT EXISTS settings (
 `);
 
 ensureColumn("transactions", "loan_origin_id", "TEXT");
+ensureColumn("transactions", "reimburse_amount", "REAL NOT NULL DEFAULT 0");
+db.exec(`UPDATE transactions SET reimburse_amount = ABS(amount)
+  WHERE reimburse_amount = 0 AND amount < 0 AND category_id IN ('loan_out', 'money_back')`);
+db.exec(`UPDATE transactions SET category_id = NULL WHERE category_id = 'money_back'`);
+db.exec(`UPDATE transactions SET category_id = 'reimbursement'
+  WHERE category_id = 'loan_in' AND loan_origin_id IN (
+    SELECT id FROM transactions
+    WHERE IFNULL(category_id, '') <> 'loan_out' AND splits NOT LIKE '%"loan_out"%'
+  )`);
+ensureColumn("gold_lots", "pieces", "TEXT");
+const addedShowInReport = ensureColumn("categories", "show_in_report", "INTEGER NOT NULL DEFAULT 0");
 
-function ensureColumn(table: string, name: string, spec: string): void {
+function ensureColumn(table: string, name: string, spec: string): boolean {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
-  if (cols.some((col) => col.name === name)) return;
+  if (cols.some((col) => col.name === name)) return false;
   db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${spec}`);
+  return true;
 }
 
 export function persistSeedRules(): void {
@@ -148,11 +181,20 @@ export function seedIfEmpty(): void {
   }
 
   const insertCat = db.prepare(
-    `INSERT INTO categories (id, name, kind, budget, color, sort, exclude_from_budget)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO categories (id, name, kind, budget, color, sort, exclude_from_budget, show_in_report)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   for (const c of SEED_CATEGORIES) {
-    insertCat.run(c.id, c.name, c.kind, c.budget, c.color, c.sort, c.excludeFromBudget ? 1 : 0);
+    insertCat.run(
+      c.id,
+      c.name,
+      c.kind,
+      c.budget,
+      c.color,
+      c.sort,
+      c.excludeFromBudget ? 1 : 0,
+      c.showInReport ? 1 : 0,
+    );
   }
 
   const insertRule = db.prepare(
@@ -176,16 +218,99 @@ export function seedIfEmpty(): void {
   );
 }
 
-/** Add any seed categories missing from an existing DB (e.g. Cash to classify). */
+/** Add any seed categories missing from an existing DB. */
 export function ensureSeedCategories(): void {
   const insertCat = db.prepare(
-    `INSERT OR IGNORE INTO categories (id, name, kind, budget, color, sort, exclude_from_budget)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR IGNORE INTO categories (id, name, kind, budget, color, sort, exclude_from_budget, show_in_report)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   for (const c of SEED_CATEGORIES) {
-    insertCat.run(c.id, c.name, c.kind, c.budget, c.color, c.sort, c.excludeFromBudget ? 1 : 0);
+    insertCat.run(
+      c.id,
+      c.name,
+      c.kind,
+      c.budget,
+      c.color,
+      c.sort,
+      c.excludeFromBudget ? 1 : 0,
+      c.showInReport ? 1 : 0,
+    );
   }
-  db.prepare("UPDATE categories SET name=? WHERE id=?").run("Cash (to classify)", "cash_unclassified");
+  const rename = db.prepare("UPDATE categories SET name=? WHERE id=? AND name=?");
+  rename.run("Money Lent", "loan_out", "Money back (expected)");
+  for (const old of ["Money Returned", "Money back (received)"]) rename.run("Paid back", "loan_in", old);
+  rename.run("Reimbursed", "reimbursement", "Reimbursement");
+  db.prepare("DELETE FROM categories WHERE id = 'money_back'").run();
+  const insertRule = db.prepare(
+    `INSERT OR IGNORE INTO rules (id, priority, category_id, field, match, value, note, learned)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  for (const r of SEED_RULES.filter((rule) => rule.id === "r-cash-deposit" || rule.id === "r-cash-deposit2")) {
+    insertRule.run(r.id, r.priority, r.categoryId, r.field, r.match, r.value, r.note ?? "", r.learned ? 1 : 0);
+  }
+  migrateZakatToDonation();
+  removeCashUnclassified();
+  if (addedShowInReport) backfillShowInReport();
+}
+
+function backfillShowInReport(): void {
+  const update = db.prepare("UPDATE categories SET show_in_report = ? WHERE id = ?");
+  for (const c of SEED_CATEGORIES) {
+    update.run(c.showInReport ? 1 : 0, c.id);
+  }
+  // User-created expense/income categories default onto the year sheet.
+  db.prepare(
+    `UPDATE categories SET show_in_report = 1
+     WHERE kind IN ('expense', 'income')
+       AND id NOT IN (${SEED_CATEGORIES.map(() => "?").join(",")})`,
+  ).run(...SEED_CATEGORIES.map((c) => c.id));
+}
+
+function migrateZakatToDonation(): void {
+  const zakat = db.prepare("SELECT budget FROM categories WHERE id = 'zakat'").get() as { budget: number } | undefined;
+  if (!zakat) return;
+
+  const existingDonation = db.prepare("SELECT budget FROM categories WHERE id = 'donation'").get() as
+    | { budget: number }
+    | undefined;
+  if (!existingDonation) {
+    insertCategory({
+      id: "donation",
+      name: "Donation",
+      kind: "expense",
+      budget: Number(zakat.budget),
+      color: "#b7791f",
+      sort: 250,
+      excludeFromBudget: false,
+      showInReport: true,
+    });
+  } else {
+    db.prepare("UPDATE categories SET budget = ? WHERE id = 'donation'").run(
+      Math.round((existingDonation.budget + Number(zakat.budget)) * 100) / 100,
+    );
+  }
+
+  db.prepare("UPDATE transactions SET category_id = 'donation' WHERE category_id = 'zakat'").run();
+  db.prepare(
+    `UPDATE transactions SET splits = REPLACE(splits, '"categoryId":"zakat"', '"categoryId":"donation"')
+     WHERE splits LIKE '%"zakat"%'`,
+  ).run();
+  db.prepare("UPDATE cash_movements SET category_id = 'donation' WHERE category_id = 'zakat'").run();
+  db.prepare("UPDATE rules SET category_id = 'donation' WHERE category_id = 'zakat'").run();
+  db.prepare("DELETE FROM categories WHERE id = 'zakat'").run();
+}
+
+function removeCashUnclassified(): void {
+  const exists = db.prepare("SELECT 1 AS ok FROM categories WHERE id = 'cash_unclassified'").get();
+  if (!exists) return;
+  db.prepare("UPDATE transactions SET category_id = 'miscellaneous' WHERE category_id = 'cash_unclassified'").run();
+  db.prepare(
+    `UPDATE transactions SET splits = REPLACE(splits, '"categoryId":"cash_unclassified"', '"categoryId":"miscellaneous"')
+     WHERE splits LIKE '%"cash_unclassified"%'`,
+  ).run();
+  db.prepare("UPDATE cash_movements SET category_id = 'miscellaneous' WHERE category_id = 'cash_unclassified'").run();
+  db.prepare("UPDATE rules SET category_id = 'miscellaneous' WHERE category_id = 'cash_unclassified'").run();
+  db.prepare("DELETE FROM categories WHERE id = 'cash_unclassified'").run();
 }
 
 export function getSettings(): AppSettings {
@@ -253,6 +378,7 @@ export function listCategories(): Category[] {
     color: String(r.color),
     sort: Number(r.sort),
     excludeFromBudget: Boolean(r.exclude_from_budget),
+    showInReport: Boolean(r.show_in_report),
   }));
 }
 
@@ -351,20 +477,39 @@ export function listCashMovements(): CashMovement[] {
 
 export function cashBalance(): number {
   const row = db.prepare(`
-    SELECT COALESCE(SUM(CASE WHEN type = 'cash_out' THEN -amount ELSE amount END), 0) AS bal
+    SELECT COALESCE(SUM(
+      CASE WHEN type IN ('cash_out', 'bank_out') THEN -amount ELSE amount END
+    ), 0) AS bal
     FROM cash_movements
   `).get() as { bal: number };
   return Math.round(Number(row.bal) * 100) / 100;
 }
 
-export function insertTransaction(tx: Transaction): void {
+export function replaceOpeningCash(amount: number, date: string): void {
+  db.prepare("DELETE FROM cash_movements WHERE type = 'opening'").run();
+  if (!(amount > 0)) return;
+  insertCashMovement({
+    id: crypto.randomUUID(),
+    type: "opening",
+    amount: Math.round(amount * 100) / 100,
+    date,
+    month: date.slice(0, 7),
+    categoryId: null,
+    note: "Opening cash",
+    transactionId: null,
+    createdAt: new Date().toISOString(),
+  });
+}
+
+export function insertTransaction(input: Transaction): void {
+  const tx = normalizeReimburse(input);
   db.prepare(
     `INSERT INTO transactions (
       id, fingerprint, account_iban, booking_date, value_date, month, booking_text, purpose,
       counterparty, iban, bic, amount, currency, end_to_end_ref, mandate_ref, creditor_id, info,
       category_id, splits, spread_months, spread_start, excluded, notes, loan_person_id,
-      loan_direction, loan_origin_id, import_id, source, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      loan_direction, loan_origin_id, import_id, source, created_at, reimburse_amount
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     tx.id,
     tx.fingerprint,
@@ -395,17 +540,18 @@ export function insertTransaction(tx: Transaction): void {
     tx.importId,
     tx.source,
     tx.createdAt,
+    tx.reimburseAmount,
   );
 }
 
 export function updateTransaction(id: string, patch: Partial<Transaction>): Transaction | undefined {
   const current = getTransaction(id);
   if (!current) return undefined;
-  const next = { ...current, ...patch, id: current.id, fingerprint: current.fingerprint };
+  const next = normalizeReimburse({ ...current, ...patch, id: current.id, fingerprint: current.fingerprint });
   db.prepare(
     `UPDATE transactions SET
       category_id=?, splits=?, spread_months=?, spread_start=?, excluded=?, notes=?,
-      loan_person_id=?, loan_direction=?, loan_origin_id=?, month=?
+      loan_person_id=?, loan_direction=?, loan_origin_id=?, month=?, reimburse_amount=?
      WHERE id=?`,
   ).run(
     next.categoryId,
@@ -418,6 +564,7 @@ export function updateTransaction(id: string, patch: Partial<Transaction>): Tran
     next.loanDirection,
     next.loanOriginId,
     next.month,
+    next.reimburseAmount,
     id,
   );
   return getTransaction(id);
@@ -428,6 +575,274 @@ export function insertCashMovement(m: CashMovement): void {
     `INSERT INTO cash_movements (id, type, amount, date, month, category_id, note, transaction_id, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(m.id, m.type, m.amount, m.date, m.month, m.categoryId, m.note, m.transactionId, m.createdAt);
+}
+
+const EDITABLE_CASH_TYPES = new Set<CashMovement["type"]>(["cash_in", "cash_out", "bank_out"]);
+
+export function getCashMovement(id: string): CashMovement | undefined {
+  return listCashMovements().find((m) => m.id === id);
+}
+
+export function getCashMovementByTransaction(transactionId: string): CashMovement | undefined {
+  return listCashMovements().find((m) => m.transactionId === transactionId);
+}
+
+export function syncCashMovementCategory(transactionId: string, categoryId: string | null): void {
+  db.prepare("UPDATE cash_movements SET category_id = ? WHERE transaction_id = ?").run(categoryId, transactionId);
+}
+
+/** Keep wallet in sync when a bank booking is tagged ATM / cash deposit (or untagged). */
+export function syncWalletForBankTransfer(tx: Transaction, previousCategoryId: string | null): void {
+  if (tx.source !== "bank") return;
+
+  const linked = getCashMovementByTransaction(tx.id);
+  const wantsAtm = tx.categoryId === "to_cash" && tx.amount < 0;
+  const wantsDeposit = tx.categoryId === "from_cash" && tx.amount > 0;
+
+  if (!wantsAtm && !wantsDeposit) {
+    if (
+      linked &&
+      ((previousCategoryId === "to_cash" && linked.type === "atm_in") ||
+        (previousCategoryId === "from_cash" && linked.type === "bank_out"))
+    ) {
+      db.prepare("DELETE FROM cash_movements WHERE id = ?").run(linked.id);
+    }
+    return;
+  }
+
+  const amount = Math.abs(tx.amount);
+  const date = tx.valueDate || tx.bookingDate;
+  const month = date.slice(0, 7);
+  const type = wantsAtm ? "atm_in" : "bank_out";
+  const categoryId = wantsAtm ? "to_cash" : "from_cash";
+  const note = wantsAtm ? tx.purpose || "ATM withdrawal" : tx.purpose || "Cash to bank";
+
+  if (linked) {
+    db.prepare(
+      `UPDATE cash_movements SET type = ?, amount = ?, date = ?, month = ?, category_id = ?, note = ? WHERE id = ?`,
+    ).run(type, amount, date, month, categoryId, note, linked.id);
+    return;
+  }
+
+  if (wantsDeposit) {
+    const orphan = listCashMovements().find(
+      (m) =>
+        m.type === "bank_out" &&
+        !m.transactionId &&
+        Math.abs(m.amount - amount) < 0.005 &&
+        Math.abs(Date.parse(m.date) - Date.parse(date)) <= 7 * 86400000,
+    );
+    if (orphan) {
+      db.prepare(
+        `UPDATE cash_movements SET transaction_id = ?, category_id = ?, date = ?, month = ?, note = ? WHERE id = ?`,
+      ).run(tx.id, categoryId, date, month, orphan.note || note, orphan.id);
+      return;
+    }
+  }
+
+  insertCashMovement({
+    id: crypto.randomUUID(),
+    type,
+    amount,
+    date,
+    month,
+    categoryId,
+    note,
+    transactionId: tx.id,
+    createdAt: new Date().toISOString(),
+  });
+}
+
+export function updateCashMovement(
+  id: string,
+  patch: { amount?: number; date?: string; categoryId?: string | null; note?: string },
+): CashMovement | undefined {
+  const current = getCashMovement(id);
+  if (!current || !EDITABLE_CASH_TYPES.has(current.type)) return undefined;
+  // Bank-linked ATM / deposit rows follow the bank booking — edit there.
+  if (current.transactionId) {
+    const linked = getTransaction(current.transactionId);
+    if (linked?.source === "bank") return undefined;
+  }
+
+  const amount = patch.amount != null ? Math.abs(Number(patch.amount)) : current.amount;
+  const date = patch.date ?? current.date;
+  const month = date.slice(0, 7);
+  const categoryId =
+    current.type === "bank_out"
+      ? "from_cash"
+      : patch.categoryId !== undefined
+        ? patch.categoryId
+        : current.categoryId;
+  const note = patch.note !== undefined ? patch.note : current.note;
+
+  if (!(amount > 0) || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return undefined;
+
+  db.prepare(
+    `UPDATE cash_movements SET amount = ?, date = ?, month = ?, category_id = ?, note = ? WHERE id = ?`,
+  ).run(amount, date, month, categoryId, note, id);
+
+  if (current.transactionId) {
+    const tx = getTransaction(current.transactionId);
+    if (tx && tx.source === "cash") {
+      const signed = current.type === "cash_out" ? -amount : amount;
+      const catName =
+        (categoryId && listCategories().find((c) => c.id === categoryId)?.name) ||
+        (current.type === "cash_out" ? "Cash spend" : "Cash in");
+      const bookingText = note || (current.type === "cash_out" ? "Cash spend" : "Cash in");
+      db.prepare(
+        `UPDATE transactions SET
+          booking_date = ?, value_date = ?, month = ?, amount = ?,
+          booking_text = ?, purpose = ?, counterparty = ?, notes = ?, category_id = ?
+         WHERE id = ?`,
+      ).run(date, date, month, signed, bookingText, note, catName, note, categoryId, current.transactionId);
+      const refreshed = getTransaction(current.transactionId);
+      if (refreshed) {
+        const normalized = normalizeReimburse(refreshed);
+        if (normalized.reimburseAmount !== refreshed.reimburseAmount) {
+          db.prepare("UPDATE transactions SET reimburse_amount = ? WHERE id = ?").run(
+            normalized.reimburseAmount,
+            current.transactionId,
+          );
+        }
+      }
+    }
+  }
+
+  return getCashMovement(id);
+}
+
+export function deleteCashMovement(id: string): boolean {
+  const current = getCashMovement(id);
+  if (!current || !EDITABLE_CASH_TYPES.has(current.type)) return false;
+  if (current.transactionId) {
+    const linked = getTransaction(current.transactionId);
+    if (linked?.source === "bank") return false;
+  }
+  db.prepare("DELETE FROM cash_movements WHERE id = ?").run(id);
+  if (current.transactionId) {
+    const tx = getTransaction(current.transactionId);
+    if (tx?.source === "cash") db.prepare("DELETE FROM transactions WHERE id = ?").run(current.transactionId);
+  }
+  return true;
+}
+
+function parseJson(value: unknown): unknown {
+  if (Array.isArray(value) || (value && typeof value === "object")) return value;
+  if (typeof value !== "string" || !value.trim()) return [];
+  try {
+    return JSON.parse(value);
+  } catch {
+    return [];
+  }
+}
+
+function goldPiecesFromRow(r: Record<string, unknown>): GoldPiece[] {
+  const pieces = normalizeGoldPieces(parseJson(r.pieces)).filter((piece) => piece.grams > 0);
+  if (pieces.length) return pieces;
+  return piecesFromLegacy(String(r.id), Number(r.grams), String(r.purity ?? ""), (r.form as GoldForm) || "bar");
+}
+
+function backfillGoldPieces(): void {
+  const rows = db.prepare("SELECT id, grams, purity, form, pieces FROM gold_lots").all() as Record<string, unknown>[];
+  const update = db.prepare("UPDATE gold_lots SET pieces = ? WHERE id = ?");
+  for (const row of rows) {
+    const raw = String(row.pieces ?? "").trim();
+    if (raw && raw !== "[]") continue;
+    update.run(JSON.stringify(goldPiecesFromRow(row)), String(row.id));
+  }
+}
+
+backfillGoldPieces();
+
+function rowToGoldLot(r: Record<string, unknown>): GoldLot {
+  const pieces = goldPiecesFromRow(r);
+  const summary = piecesSummary(pieces);
+  return {
+    id: String(r.id),
+    purchasedAt: String(r.purchased_at),
+    grams: summary.grams || Number(r.grams),
+    purity: summary.purity,
+    form: summary.form,
+    dealer: String(r.dealer ?? ""),
+    invoiceRef: String(r.invoice_ref ?? ""),
+    totalPaid: Number(r.total_paid),
+    pricePerGram: Number(r.price_per_gram),
+    note: String(r.note ?? ""),
+    pieces,
+    createdAt: String(r.created_at),
+  };
+}
+
+export function listGoldLots(): GoldLot[] {
+  const rows = db.prepare("SELECT * FROM gold_lots ORDER BY purchased_at DESC, created_at DESC").all() as Record<
+    string,
+    unknown
+  >[];
+  return rows.map(rowToGoldLot);
+}
+
+export function getGoldLot(id: string): GoldLot | undefined {
+  const row = db.prepare("SELECT * FROM gold_lots WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+  return row ? rowToGoldLot(row) : undefined;
+}
+
+export function insertGoldLot(lot: GoldLot): void {
+  const pieces = lot.pieces?.length ? lot.pieces : piecesFromLegacy(lot.id, lot.grams, lot.purity, lot.form);
+  const summary = piecesSummary(pieces);
+  db.prepare(
+    `INSERT INTO gold_lots (
+      id, purchased_at, grams, purity, form, dealer, invoice_ref, total_paid, price_per_gram, note, pieces, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    lot.id,
+    lot.purchasedAt,
+    summary.grams || lot.grams,
+    summary.purity,
+    summary.form,
+    lot.dealer,
+    lot.invoiceRef,
+    lot.totalPaid,
+    lot.pricePerGram,
+    lot.note,
+    JSON.stringify(pieces),
+    lot.createdAt,
+  );
+}
+
+export function updateGoldLot(id: string, patch: Partial<GoldLot>): GoldLot | undefined {
+  const current = getGoldLot(id);
+  if (!current) return undefined;
+  const next = { ...current, ...patch, id: current.id, createdAt: current.createdAt };
+  const pieces = next.pieces?.length ? next.pieces : piecesFromLegacy(next.id, next.grams, next.purity, next.form);
+  const summary = piecesSummary(pieces);
+  next.pieces = pieces;
+  next.grams = summary.grams;
+  next.purity = summary.purity;
+  next.form = summary.form;
+  next.pricePerGram = next.grams > 0 ? Math.round((next.totalPaid / next.grams) * 100) / 100 : 0;
+  db.prepare(
+    `UPDATE gold_lots SET
+      purchased_at=?, grams=?, purity=?, form=?, dealer=?, invoice_ref=?, total_paid=?, price_per_gram=?, note=?, pieces=?
+     WHERE id=?`,
+  ).run(
+    next.purchasedAt,
+    next.grams,
+    next.purity,
+    next.form,
+    next.dealer,
+    next.invoiceRef,
+    next.totalPaid,
+    next.pricePerGram,
+    next.note,
+    JSON.stringify(next.pieces),
+    id,
+  );
+  return getGoldLot(id);
+}
+
+export function deleteGoldLot(id: string): boolean {
+  return db.prepare("DELETE FROM gold_lots WHERE id = ?").run(id).changes > 0;
 }
 
 export function insertImport(batch: ImportBatch): void {
@@ -448,8 +863,8 @@ export function deleteRule(id: string): boolean {
 
 export function insertCategory(category: Category): void {
   db.prepare(
-    `INSERT INTO categories (id, name, kind, budget, color, sort, exclude_from_budget)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO categories (id, name, kind, budget, color, sort, exclude_from_budget, show_in_report)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     category.id,
     category.name,
@@ -458,29 +873,173 @@ export function insertCategory(category: Category): void {
     category.color,
     category.sort,
     category.excludeFromBudget ? 1 : 0,
+    category.showInReport ? 1 : 0,
   );
 }
 
+export function updateCategory(
+  id: string,
+  patch: { budget?: number; name?: string; showInReport?: boolean },
+): Category | undefined {
+  const current = listCategories().find((c) => c.id === id);
+  if (!current) return undefined;
+  const next = {
+    ...current,
+    budget: patch.budget !== undefined ? patch.budget : current.budget,
+    name: patch.name !== undefined ? patch.name : current.name,
+    showInReport: patch.showInReport !== undefined ? patch.showInReport : current.showInReport,
+  };
+  if (!next.name.trim()) return undefined;
+  db.prepare("UPDATE categories SET budget=?, name=?, show_in_report=? WHERE id=?").run(
+    next.budget,
+    next.name.trim(),
+    next.showInReport ? 1 : 0,
+    id,
+  );
+  return listCategories().find((c) => c.id === id);
+}
+
+/** @deprecated Prefer updateCategory */
 export function updateCategoryBudget(id: string, budget: number, name?: string): void {
-  if (name) {
-    db.prepare("UPDATE categories SET budget=?, name=? WHERE id=?").run(budget, name, id);
-  } else {
-    db.prepare("UPDATE categories SET budget=? WHERE id=?").run(budget, id);
+  updateCategory(id, { budget, name });
+}
+
+export function categoryUsage(id: string): { bookings: number; rules: number } {
+  const tx = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM transactions
+       WHERE category_id = ? OR splits LIKE ?`,
+    )
+    .get(id, `%"categoryId":"${id}"%`) as { n: number };
+  const cash = db.prepare("SELECT COUNT(*) AS n FROM cash_movements WHERE category_id = ?").get(id) as { n: number };
+  const rules = db.prepare("SELECT COUNT(*) AS n FROM rules WHERE category_id = ?").get(id) as { n: number };
+  return { bookings: Number(tx.n) + Number(cash.n), rules: Number(rules.n) };
+}
+
+export function deleteCategory(
+  id: string,
+  moveToId?: string | null,
+): { ok: true } | { ok: false; error: string } {
+  const current = listCategories().find((c) => c.id === id);
+  if (!current) return { ok: false, error: "Category not found" };
+  if (current.kind === "transfer") {
+    return { ok: false, error: "Transfer categories cannot be deleted" };
   }
+
+  const usage = categoryUsage(id);
+  const moveTo = moveToId ? listCategories().find((c) => c.id === moveToId) : undefined;
+
+  if (usage.bookings > 0) {
+    if (!moveTo) return { ok: false, error: "Pick a category to move existing bookings into" };
+    if (moveTo.id === id) return { ok: false, error: "Move target must be a different category" };
+    if (moveTo.kind === "transfer") {
+      return { ok: false, error: "Cannot move bookings into a transfer category" };
+    }
+    if (moveTo.kind !== current.kind) {
+      return { ok: false, error: `Move target must be ${current.kind}` };
+    }
+    reassignCategory(id, moveTo.id);
+    db.prepare("UPDATE categories SET budget = ? WHERE id = ?").run(
+      Math.round((moveTo.budget + current.budget) * 100) / 100,
+      moveTo.id,
+    );
+  } else if (moveTo) {
+    if (moveTo.id === id) return { ok: false, error: "Move target must be a different category" };
+    if (moveTo.kind !== current.kind) {
+      return { ok: false, error: `Move target must be ${current.kind}` };
+    }
+    db.prepare("UPDATE rules SET category_id = ? WHERE category_id = ?").run(moveTo.id, id);
+    db.prepare("UPDATE categories SET budget = ? WHERE id = ?").run(
+      Math.round((moveTo.budget + current.budget) * 100) / 100,
+      moveTo.id,
+    );
+  } else {
+    // No bookings — drop rules that pointed here.
+    db.prepare("DELETE FROM rules WHERE category_id = ?").run(id);
+  }
+
+  db.prepare("DELETE FROM categories WHERE id = ?").run(id);
+  return { ok: true };
 }
 
-export function fingerprintExists(fingerprint: string): boolean {
-  const row = db.prepare("SELECT id FROM transactions WHERE fingerprint = ?").get(fingerprint) as { id: string } | undefined;
-  return Boolean(row);
+function reassignCategory(fromId: string, toId: string): void {
+  db.prepare("UPDATE transactions SET category_id = ? WHERE category_id = ?").run(toId, fromId);
+  const splitRows = db
+    .prepare(`SELECT id, splits FROM transactions WHERE splits LIKE ?`)
+    .all(`%"categoryId":"${fromId}"%`) as { id: string; splits: string }[];
+  const updateSplits = db.prepare("UPDATE transactions SET splits = ? WHERE id = ?");
+  for (const row of splitRows) {
+    try {
+      const splits = JSON.parse(String(row.splits || "[]")) as { categoryId?: string }[];
+      if (!Array.isArray(splits)) continue;
+      const next = splits.map((line) =>
+        line?.categoryId === fromId ? { ...line, categoryId: toId } : line,
+      );
+      updateSplits.run(JSON.stringify(next), row.id);
+    } catch {
+      /* keep original */
+    }
+  }
+  db.prepare("UPDATE cash_movements SET category_id = ? WHERE category_id = ?").run(toId, fromId);
+  db.prepare("UPDATE rules SET category_id = ? WHERE category_id = ?").run(toId, fromId);
 }
 
-export function findBySoftKey(bookingDate: string, counterparty: string, iban: string, amount: number): Transaction | undefined {
-  const row = db.prepare(
-    `SELECT * FROM transactions
-     WHERE booking_date = ? AND counterparty = ? AND iban = ? AND ROUND(amount * 100) = ROUND(? * 100)
-     LIMIT 1`,
-  ).get(bookingDate, counterparty, iban, amount) as Record<string, unknown> | undefined;
-  return row ? rowToTransaction(row) : undefined;
+export type ImportMatchKind = "fingerprint" | "endToEnd" | "settled" | "soft";
+
+export function findImportMatch(row: ParsedRow): { kind: ImportMatchKind; tx: Transaction } | null {
+  const byFingerprint = db.prepare("SELECT * FROM transactions WHERE fingerprint = ?").get(row.fingerprint) as
+    | Record<string, unknown>
+    | undefined;
+  if (byFingerprint) return { kind: "fingerprint", tx: rowToTransaction(byFingerprint) };
+
+  const endToEnd = row.endToEndRef.trim();
+  if (endToEnd) {
+    const found = db
+      .prepare(
+        `SELECT * FROM transactions
+         WHERE source = 'bank' AND end_to_end_ref = ? AND ROUND(amount * 100) = ROUND(? * 100)
+         LIMIT 1`,
+      )
+      .get(endToEnd, row.amount) as Record<string, unknown> | undefined;
+    if (found) return { kind: "endToEnd", tx: rowToTransaction(found) };
+  }
+
+  const purpose = row.purpose.trim();
+  const valueDate = row.valueDate || row.bookingDate;
+  if (purpose && valueDate) {
+    const found = db
+      .prepare(
+        `SELECT * FROM transactions
+         WHERE source = 'bank' AND purpose = ? AND value_date = ? AND ROUND(amount * 100) = ROUND(? * 100)
+         LIMIT 1`,
+      )
+      .get(purpose, valueDate, row.amount) as Record<string, unknown> | undefined;
+    if (found) return { kind: "settled", tx: rowToTransaction(found) };
+  }
+
+  const date = valueDate || row.bookingDate;
+  const soft = db
+    .prepare(
+      `SELECT * FROM transactions
+       WHERE source = 'bank'
+         AND counterparty = ?
+         AND iban = ?
+         AND ROUND(amount * 100) = ROUND(? * 100)
+         AND (value_date = ? OR booking_date = ?)
+       LIMIT 1`,
+    )
+    .get(row.counterparty, row.iban, row.amount, date, row.bookingDate) as Record<string, unknown> | undefined;
+  if (soft) return { kind: "soft", tx: rowToTransaction(soft) };
+  return null;
+}
+
+export function adoptImportedDetails(id: string, row: ParsedRow): void {
+  db.prepare(
+    `UPDATE transactions
+     SET fingerprint = ?, booking_date = ?, value_date = ?, booking_text = ?,
+         end_to_end_ref = ?, purpose = ?
+     WHERE id = ?`,
+  ).run(row.fingerprint, row.bookingDate, row.valueDate, row.bookingText, row.endToEndRef, row.purpose, id);
 }
 
 function rowToTransaction(r: Record<string, unknown>): Transaction {
@@ -511,6 +1070,7 @@ function rowToTransaction(r: Record<string, unknown>): Transaction {
     loanPersonId: r.loan_person_id ? String(r.loan_person_id) : null,
     loanDirection: (r.loan_direction as Transaction["loanDirection"]) ?? null,
     loanOriginId: r.loan_origin_id ? String(r.loan_origin_id) : null,
+    reimburseAmount: Number(r.reimburse_amount ?? 0),
     importId: r.import_id ? String(r.import_id) : null,
     source: (r.source as Transaction["source"]) || "bank",
     createdAt: String(r.created_at),

@@ -42,6 +42,8 @@ export const SEED_RULES: CategoryRule[] = [
 
   rule("r-atm", 5, "to_cash", "bookingText", "BARGELDAUSZAHLUNG"),
   rule("r-atm2", 5, "to_cash", "bookingText", "AUSZAHLUNG MIT KUNDENENTGELT"),
+  rule("r-cash-deposit", 5, "from_cash", "bookingText", "BARGELDEINZAHLUNG"),
+  rule("r-cash-deposit2", 5, "from_cash", "bookingText", "EINZAHLUNG BAR"),
 
   rule("r-shop-amazon", 30, "shopping", "counterparty", "AMAZON"),
   rule("r-shop-amzn", 31, "shopping", "counterparty", "AMZN"),
