@@ -7,16 +7,19 @@ import { Money } from "../ui/Money";
 import { StatCard } from "../ui/StatCard";
 import { SectionCard } from "../ui/SectionCard";
 import { EmptyState } from "../ui/EmptyState";
+import { BackupCard } from "../ui/BackupCard";
 import type { ImportBatch, ImportPreviewRow } from "../types";
 
 export function ImportPage({
   imports,
   onPreview,
   onCommit,
+  onRestored,
 }: {
   imports: ImportBatch[];
   onPreview: (fileName: string, csvText: string) => Promise<ImportPreviewRow[]>;
   onCommit: (fileName: string, csvText: string, includeSoft: boolean) => Promise<ImportBatch>;
+  onRestored: () => Promise<void>;
 }) {
   const [fileName, setFileName] = useState("");
   const [csvText, setCsvText] = useState("");
@@ -171,6 +174,8 @@ export function ImportPage({
           </Upload.Dragger>
         </div>
       </SectionCard>
+
+      <BackupCard onRestored={onRestored} />
     </>
   );
 }

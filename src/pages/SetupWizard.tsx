@@ -5,6 +5,7 @@ import dayjs, { type Dayjs } from "dayjs";
 import { api } from "../api";
 import { parseGermanAmount } from "../lib/money";
 import { readCsvFile } from "../lib/parseSparkasse";
+import { restoreBackupFile } from "../lib/backup";
 import type { ImportBatch } from "../types";
 import { APP_NAME } from "../brand";
 
@@ -69,6 +70,19 @@ export function SetupWizard({ onDone }: { onDone: () => Promise<void> }) {
     }
   }
 
+  async function restore(file: File) {
+    setError("");
+    setBusy(true);
+    try {
+      await restoreBackupFile(file);
+      await onDone();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Restore failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function finish(withImport: boolean) {
     setError("");
     setBusy(true);
@@ -114,6 +128,19 @@ export function SetupWizard({ onDone }: { onDone: () => Promise<void> }) {
             <Button type="primary" size="large" onClick={() => setStep(1)}>
               Get started
             </Button>
+            <Typography.Paragraph type="secondary" style={{ marginTop: 24, marginBottom: 8 }}>
+              Moving from another machine? Upload a Haushalt backup to bring everything back exactly as it was.
+            </Typography.Paragraph>
+            <Upload
+              accept=".json,application/json"
+              showUploadList={false}
+              beforeUpload={(file) => {
+                void restore(file);
+                return false;
+              }}
+            >
+              <Button loading={busy}>Restore from a backup</Button>
+            </Upload>
           </div>
         )}
 

@@ -108,6 +108,12 @@ export const api = {
     request<GoldLot>(`/api/v1/gold/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteGold: (id: string) => request<{ ok: boolean }>(`/api/v1/gold/${id}`, { method: "DELETE" }),
   exportAll: () => request<unknown>("/api/v1/export"),
+  backup: () => request<{ exportedAt: string }>("/api/v1/backup"),
+  restoreBackup: (backupText: string) =>
+    request<{ ok: boolean; restored: Record<string, number> }>("/api/v1/backup/restore", {
+      method: "POST",
+      body: backupText,
+    }),
   account: () => request<AccountState>("/api/v1/account"),
   setup: (body: {
     openingBalance: number;

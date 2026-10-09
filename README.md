@@ -63,6 +63,10 @@ Copy `.env.example` to `.env`:
 | `HAUSHALT_AI_BASE_URL` | OpenAI | Optional custom base URL |
 | `HAUSHALT_AI_MODEL` | `gpt-4o-mini` | Optional model name |
 
+## Backup and restore
+
+**Import → Backup** downloads everything (bookings, categories, budgets, rules, people, cash, gold, settings) as one JSON file. On a fresh install, choose **Restore from a backup** on the welcome screen, or use **Import → Restore**, and upload that file to get the exact same state back. Restoring replaces whatever is in the app. The file holds your full bank history, so store it somewhere private.
+
 ## API
 
 See [API.md](./API.md) for the full endpoint catalog. Auth:

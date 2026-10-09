@@ -41,6 +41,8 @@ Catalog: `GET /api/v1` (no auth)
 | POST | `/contracts/analyze` | Re-run detection (uses `HAUSHALT_AI_KEY` or local Ollama if present) |
 | GET | `/forecast` | Payday, upcoming contracts, Fixkosten, tomorrow / 7-day balance |
 | GET | `/report?year=2026` | Year sheet: category × month, totals, leftover |
+| GET | `/backup` | Full backup: every table and column as one JSON file |
+| POST | `/backup/restore` | Body = a backup file. Replaces the whole database with it |
 | POST | `/ask` | `{ "question": "How much until payday?", "month?": "2026-09" }` |
 
 Telegram later can call the same routes, for example:

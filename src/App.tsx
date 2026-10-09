@@ -209,6 +209,7 @@ export function App() {
                 await reload();
                 return batch;
               }}
+              onRestored={reload}
             />
           }
         />

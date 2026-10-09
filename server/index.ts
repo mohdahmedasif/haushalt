@@ -66,6 +66,8 @@ import {
   updateCategory,
   deleteCategory,
   updateTransaction,
+  exportBackup,
+  restoreBackup,
 } from "./db.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -82,6 +84,8 @@ repairSpreads();
 
 const app = express();
 app.use(cors());
+// A full backup can outgrow the normal body limit; once parsed here the default parser skips it.
+app.use("/api/v1/backup/restore", express.json({ limit: "512mb" }));
 app.use(express.json({ limit: "12mb" }));
 
 app.use("/api", (req: Request, res: Response, next: NextFunction) => {
@@ -142,6 +146,8 @@ app.get("/api/v1", (_req, res) => {
       "DELETE /api/v1/rules/:id",
       "POST /api/v1/rules/apply",
       "GET /api/v1/export",
+      "GET /api/v1/backup",
+      "POST /api/v1/backup/restore  <backup file contents>",
     ],
   });
 });
@@ -701,6 +707,21 @@ app.get("/api/v1/export", (_req, res) => {
     goldLots: listGoldLots(),
     imports: listImports(),
   });
+});
+
+app.get("/api/v1/backup", (_req, res) => {
+  const backup = exportBackup();
+  res.setHeader("Content-Disposition", `attachment; filename="haushalt-backup-${backup.exportedAt.slice(0, 10)}.json"`);
+  res.json(backup);
+});
+
+app.post("/api/v1/backup/restore", (req, res) => {
+  try {
+    const restored = restoreBackup(req.body);
+    res.json({ ok: true, restored, account: accountState() });
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : "Restore failed" });
+  }
 });
 
 const dist = join(root, "dist");

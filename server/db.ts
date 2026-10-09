@@ -1122,3 +1122,69 @@ function monthGap(from: string, to: string): number {
   const [y2, m2] = to.split("-").map(Number);
   return (y2 - y1) * 12 + (m2 - m1);
 }
+
+const BACKUP_FORMAT = 1;
+/** A file without these is not a Haushalt backup — refuse it before wiping anything. */
+const BACKUP_REQUIRED_TABLES = ["categories", "transactions", "settings"];
+
+export type Backup = {
+  app: "haushalt";
+  format: number;
+  exportedAt: string;
+  tables: Record<string, Record<string, unknown>[]>;
+};
+
+function backupTables(): string[] {
+  const rows = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+    .all() as { name: string }[];
+  return rows.map((r) => r.name);
+}
+
+/** Raw dump of every table and column, so a restore reproduces the database exactly. */
+export function exportBackup(): Backup {
+  const tables: Backup["tables"] = {};
+  for (const table of backupTables()) {
+    tables[table] = db.prepare(`SELECT * FROM "${table}"`).all() as Record<string, unknown>[];
+  }
+  return { app: "haushalt", format: BACKUP_FORMAT, exportedAt: new Date().toISOString(), tables };
+}
+
+/** Replace the whole database with a backup. All-or-nothing: any bad row rolls everything back. */
+export function restoreBackup(input: unknown): Record<string, number> {
+  const backup = input as Partial<Backup> | null;
+  if (!backup || typeof backup !== "object" || backup.app !== "haushalt" || !backup.tables || typeof backup.tables !== "object") {
+    throw new Error("This file is not a Haushalt backup.");
+  }
+  if (typeof backup.format !== "number" || backup.format > BACKUP_FORMAT) {
+    throw new Error("This backup was made by a newer version of Haushalt. Update the app first.");
+  }
+  for (const table of BACKUP_REQUIRED_TABLES) {
+    if (!Array.isArray(backup.tables[table])) throw new Error(`The backup is incomplete: "${table}" is missing.`);
+  }
+
+  const restored: Record<string, number> = {};
+  db.exec("BEGIN");
+  try {
+    for (const table of backupTables()) {
+      const rows = backup.tables[table] ?? [];
+      if (!Array.isArray(rows)) throw new Error(`The backup is damaged: "${table}" is not a list.`);
+      const columns = (db.prepare(`PRAGMA table_info("${table}")`).all() as { name: string }[]).map((c) => c.name);
+      db.exec(`DELETE FROM "${table}"`);
+      for (const row of rows) {
+        // Columns the backup lacks (older backup) fall back to their schema defaults.
+        const present = columns.filter((c) => Object.hasOwn(row, c));
+        if (!present.length) throw new Error(`The backup is damaged: a "${table}" row has no known columns.`);
+        db.prepare(
+          `INSERT INTO "${table}" (${present.map((c) => `"${c}"`).join(", ")}) VALUES (${present.map(() => "?").join(", ")})`,
+        ).run(...present.map((c) => row[c] as string | number | null));
+      }
+      restored[table] = rows.length;
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+  return restored;
+}
