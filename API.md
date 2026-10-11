@@ -3,8 +3,9 @@
 Local JSON API for the Haushalt web app.
 
 - Base: `http://127.0.0.1:8787/api/v1`
-- Auth: `Authorization: Bearer haushalt-local` (change `HAUSHALT_API_KEY` in `.env`)
-- Also accepted: `X-Api-Key: haushalt-local`
+- Auth: `Authorization: Bearer <KEY>` when `KEY` is set in `.env`; no auth when it is unset
+- Also accepted: `X-Api-Key: <KEY>`
+- Always public: `/health` and `/auth`
 
 Start both UI and API from the repo root:
 
@@ -14,13 +15,14 @@ npm run dev
 ```
 
 UI: http://127.0.0.1:5173  
-Catalog: `GET /api/v1` (no auth)
+Catalog: `GET /api/v1`
 
 ## Endpoints
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/health` | Liveness |
+| GET | `/auth` | `{ required, name }` Whether a key is needed |
 | GET | `/summary?month=2026-09` | Income, expense, leftover, cash on hand, per-category |
 | GET | `/categories` | Category list + budgets |
 | POST | `/categories` | `{ "name": "Pets", "kind": "expense", "budget": 50 }` |
@@ -38,9 +40,14 @@ Catalog: `GET /api/v1` (no auth)
 | DELETE | `/rules/:id` | Remove a rule |
 | POST | `/rules/apply` | Tag uncategorized bookings that match rules |
 | GET | `/contracts` | Recurring SEPA/salary contracts + AI labels |
-| POST | `/contracts/analyze` | Re-run detection (uses `HAUSHALT_AI_KEY` or local Ollama if present) |
+| POST | `/contracts/analyze` | Re-run detection (uses Gemini when a key is saved in Settings) |
 | GET | `/forecast` | Payday, upcoming contracts, Fixkosten, tomorrow / 7-day balance |
 | GET | `/report?year=2026` | Year sheet: category × month, totals, leftover |
+| GET | `/ai` | Gemini status: `{ hasKey, keyHint, unreadable, model }` (never the key) |
+| GET | `/ai/models` | Gemini models the saved key can use |
+| PUT | `/ai/key` | `{ "apiKey" }` Checks the key with Gemini, then stores it encrypted |
+| DELETE | `/ai/key` | Remove the saved key |
+| PATCH | `/ai` | `{ "model": "gemini-flash-latest" }` |
 | GET | `/backup` | Full backup: every table and column as one JSON file |
 | POST | `/backup/restore` | Body = a backup file. Replaces the whole database with it |
 | POST | `/ask` | `{ "question": "How much until payday?", "month?": "2026-09" }` |

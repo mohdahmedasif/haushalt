@@ -10,6 +10,7 @@ export const PATHS: Record<ViewId, string> = {
   contracts: "/contracts",
   import: "/import",
   rules: "/rules",
+  settings: "/settings",
 };
 
 export function pathToView(pathname: string): ViewId {

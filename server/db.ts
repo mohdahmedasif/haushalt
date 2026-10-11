@@ -37,7 +37,7 @@ function defaultSettings(): AppSettings {
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 /** Runtime store only — created and seeded by the API on first start. Do not check in. */
-const dataDir = join(root, "data");
+export const dataDir = join(root, "data");
 mkdirSync(dataDir, { recursive: true });
 
 export const db = new DatabaseSync(join(dataDir, "haushalt.sqlite"));

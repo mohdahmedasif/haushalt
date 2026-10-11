@@ -1,5 +1,6 @@
 import type {
   AccountState,
+  AiStatus,
   CashMovement,
   Category,
   CategoryRule,
@@ -14,17 +15,59 @@ import type { Forecast } from "./lib/forecast";
 import type { AskAnswer } from "./lib/ask";
 import type { DetectedContract } from "./lib/contracts";
 
-const API_KEY = import.meta.env.VITE_HAUSHALT_API_KEY || "haushalt-local";
+const KEY_STORE = "haushalt.accessKey";
+
+/** The app password typed on the unlock screen. Kept for this browser session only. */
+export function getAccessKey(): string {
+  try {
+    return sessionStorage.getItem(KEY_STORE) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function storeAccessKey(key: string): void {
+  try {
+    if (key) sessionStorage.setItem(KEY_STORE, key);
+    else sessionStorage.removeItem(KEY_STORE);
+  } catch {
+    // Storage blocked: the key just will not survive a reload.
+  }
+}
+
+let unauthorized: () => void = () => {};
+
+/** Called whenever the server rejects the stored key, so the app can show the unlock screen. */
+export function onUnauthorized(handler: () => void): () => void {
+  unauthorized = handler;
+  return () => {
+    unauthorized = () => {};
+  };
+}
+
+/** Keep the key only if the server accepts it. */
+export async function tryAccessKey(key: string): Promise<boolean> {
+  const res = await fetch("/api/v1/account", { headers: { Authorization: `Bearer ${key}` } });
+  if (res.status === 401) return false;
+  if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+  storeAccessKey(key);
+  return true;
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const key = getAccessKey();
   const res = await fetch(path, {
     ...init,
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${API_KEY}`,
+      ...(key ? { Authorization: `Bearer ${key}` } : {}),
       ...(init?.headers ?? {}),
     },
   });
+  if (res.status === 401) {
+    storeAccessKey("");
+    unauthorized();
+  }
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(body.error || `Request failed: ${res.status}`);
@@ -33,6 +76,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  authStatus: () => request<{ required: boolean; name: string }>("/api/v1/auth"),
   summary: (month: string) => request<MonthSummary>(`/api/v1/summary?month=${month}`),
   categories: () => request<Category[]>("/api/v1/categories"),
   patchCategory: (id: string, patch: { budget?: number; name?: string; showInReport?: boolean }) =>
@@ -108,6 +152,16 @@ export const api = {
     request<GoldLot>(`/api/v1/gold/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteGold: (id: string) => request<{ ok: boolean }>(`/api/v1/gold/${id}`, { method: "DELETE" }),
   exportAll: () => request<unknown>("/api/v1/export"),
+  ai: () => request<AiStatus>("/api/v1/ai"),
+  aiModels: () => request<{ id: string; name: string }[]>("/api/v1/ai/models"),
+  saveAiKey: (apiKey: string) =>
+    request<{ status: AiStatus; models: { id: string; name: string }[] }>("/api/v1/ai/key", {
+      method: "PUT",
+      body: JSON.stringify({ apiKey }),
+    }),
+  removeAiKey: () => request<AiStatus>("/api/v1/ai/key", { method: "DELETE" }),
+  setAiModel: (model: string) =>
+    request<AiStatus>("/api/v1/ai", { method: "PATCH", body: JSON.stringify({ model }) }),
   backup: () => request<{ exportedAt: string }>("/api/v1/backup"),
   restoreBackup: (backupText: string) =>
     request<{ ok: boolean; restored: Record<string, number> }>("/api/v1/backup/restore", {

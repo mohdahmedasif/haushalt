@@ -11,7 +11,17 @@ export type ViewId =
   | "budgets"
   | "rules"
   | "contracts"
-  | "report";
+  | "report"
+  | "settings";
+
+export type AiStatus = {
+  hasKey: boolean;
+  /** Last four characters of the saved key. */
+  keyHint: string | null;
+  /** A key is stored but this install cannot decrypt it. */
+  unreadable: boolean;
+  model: string | null;
+};
 
 export type CashMovementType = "opening" | "atm_in" | "cash_in" | "cash_out" | "bank_out";
 

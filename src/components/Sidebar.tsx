@@ -1,4 +1,5 @@
 import {
+  ControlOutlined,
   FileTextOutlined,
   GoldOutlined,
   HomeOutlined,
@@ -47,6 +48,7 @@ const ITEMS = [
     children: [
       { key: PATHS.import, icon: <UploadOutlined />, label: "Import" },
       { key: PATHS.rules, icon: <SettingOutlined />, label: "Rules" },
+      { key: PATHS.settings, icon: <ControlOutlined />, label: "Settings" },
     ],
   },
 ];

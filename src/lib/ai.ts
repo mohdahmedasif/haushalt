@@ -1,27 +1,23 @@
 import type { DetectedContract } from "./contracts";
 
+const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
+
+export type GeminiConfig = { apiKey: string; model: string };
+export type GeminiModel = { id: string; name: string };
+
+/** Last Gemini answer, so page reloads with unchanged contracts do not call the API again. */
+let lastAnswer: { request: string; text: string } | null = null;
+
 export async function enrichContractsWithAI(
   contracts: DetectedContract[],
+  gemini: GeminiConfig | null,
 ): Promise<{ contracts: DetectedContract[]; provider: string }> {
-  const key = process.env.HAUSHALT_AI_KEY || process.env.OPENAI_API_KEY || "";
-  const base = (process.env.HAUSHALT_AI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
-  const model = process.env.HAUSHALT_AI_MODEL || "gpt-4o-mini";
-
-  if (key) {
+  if (gemini && contracts.length) {
     try {
-      const labeled = await callChatApi(base, key, model, contracts);
-      return { contracts: labeled, provider: `openai:${model}` };
+      const labeled = await callGemini(gemini, contracts);
+      return { contracts: labeled, provider: `gemini:${gemini.model}` };
     } catch (error) {
-      console.warn("AI enrich failed, using local labels", error);
-    }
-  }
-
-  if (await ollamaUp()) {
-    try {
-      const labeled = await callOllama(contracts);
-      return { contracts: labeled, provider: "ollama" };
-    } catch (error) {
-      console.warn("Ollama enrich failed", error);
+      console.warn("Gemini enrich failed, using local labels", error);
     }
   }
 
@@ -34,9 +30,35 @@ export async function enrichContractsWithAI(
   };
 }
 
+/** Text models this key can use. Throws when Gemini rejects the key. */
+export async function listGeminiModels(apiKey: string): Promise<GeminiModel[]> {
+  const res = await fetch(`${GEMINI_BASE}/models?pageSize=1000`, {
+    headers: { "x-goog-api-key": apiKey },
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!res.ok) throw new Error(await geminiError(res));
+  const body = (await res.json()) as {
+    models?: { name: string; displayName?: string; supportedGenerationMethods?: string[] }[];
+  };
+  return (body.models ?? [])
+    .filter((m) => m.name.startsWith("models/gemini") && m.supportedGenerationMethods?.includes("generateContent"))
+    .map((m) => ({ id: m.name.replace(/^models\//, ""), name: m.displayName || m.name }));
+}
+
+export function defaultGeminiModel(models: GeminiModel[]): string | null {
+  const pick =
+    models.find((m) => m.id === "gemini-flash-latest") ?? models.find((m) => m.id.includes("flash")) ?? models[0];
+  return pick?.id ?? null;
+}
+
+async function geminiError(res: Response): Promise<string> {
+  const body = (await res.json().catch(() => null)) as { error?: { message?: string } } | null;
+  return body?.error?.message || `Gemini request failed: ${res.status}`;
+}
+
 function promptFor(contracts: DetectedContract[]): string {
   return `You classify German household SEPA contracts from bank bookings.
-Return JSON array only, same length/order. Each item: {"id":"...","name":"short English name","status":"active|paused|ended","note":"one sentence"}.
+Return {"contracts":[...]} JSON only, same length/order. Each item: {"id":"...","name":"short English name","status":"active|paused|ended","note":"one sentence"}.
 Today is ${new Date().toISOString().slice(0, 10)}.
 Data:\n${JSON.stringify(
     contracts.map((c) => ({
@@ -51,59 +73,30 @@ Data:\n${JSON.stringify(
   )}`;
 }
 
-async function callChatApi(
-  base: string,
-  key: string,
-  model: string,
-  contracts: DetectedContract[],
-): Promise<DetectedContract[]> {
-  const res = await fetch(`${base}/chat/completions`, {
+async function callGemini(gemini: GeminiConfig, contracts: DetectedContract[]): Promise<DetectedContract[]> {
+  const provider = `gemini:${gemini.model}`;
+  const prompt = promptFor(contracts);
+  const request = `${gemini.model}\n${prompt}`;
+  if (lastAnswer?.request === request) return mergeAi(contracts, lastAnswer.text, provider);
+
+  const res = await fetch(`${GEMINI_BASE}/models/${encodeURIComponent(gemini.model)}:generateContent`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${key}`,
+      "x-goog-api-key": gemini.apiKey,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model,
-      temperature: 0.1,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: "You output {\"contracts\":[...]} JSON only." },
-        { role: "user", content: promptFor(contracts) },
-      ],
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.1, responseMimeType: "application/json" },
     }),
+    signal: AbortSignal.timeout(60000),
   });
-  if (!res.ok) throw new Error(await res.text());
-  const body = await res.json();
-  const text = body.choices?.[0]?.message?.content ?? "{}";
-  return mergeAi(contracts, text, `openai:${model}`);
-}
-
-async function ollamaUp(): Promise<boolean> {
-  try {
-    const res = await fetch("http://127.0.0.1:11434/api/tags", { signal: AbortSignal.timeout(400) });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
-async function callOllama(contracts: DetectedContract[]): Promise<DetectedContract[]> {
-  const res = await fetch("http://127.0.0.1:11434/api/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: process.env.HAUSHALT_OLLAMA_MODEL || "llama3.1",
-      stream: false,
-      messages: [
-        { role: "system", content: "Return {\"contracts\":[...]} JSON only." },
-        { role: "user", content: promptFor(contracts) },
-      ],
-    }),
-  });
-  if (!res.ok) throw new Error(await res.text());
-  const body = await res.json();
-  return mergeAi(contracts, body.message?.content ?? "{}", "ollama");
+  if (!res.ok) throw new Error(await geminiError(res));
+  const body = (await res.json()) as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
+  const text = (body.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? "").join("") || "{}";
+  const labeled = mergeAi(contracts, text, provider);
+  lastAnswer = { request, text };
+  return labeled;
 }
 
 function mergeAi(contracts: DetectedContract[], raw: string, provider: string): DetectedContract[] {

@@ -56,12 +56,18 @@ Copy `.env.example` to `.env`:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `HAUSHALT_API_KEY` | `haushalt-local` | Bearer / `X-Api-Key` for the API |
-| `VITE_HAUSHALT_API_KEY` | `haushalt-local` | Same key for the UI |
-| `PORT` | `8787` | API port |
-| `HAUSHALT_AI_KEY` | — | Optional OpenAI-compatible key for contract labeling |
-| `HAUSHALT_AI_BASE_URL` | OpenAI | Optional custom base URL |
-| `HAUSHALT_AI_MODEL` | `gpt-4o-mini` | Optional model name |
+| `KEY` | not set | Password for the app. Unset means open |
+| `PORT` | `8787` | Port the app is served on |
+
+### App password
+
+Set `KEY` in `.env` and restart (with Docker: `docker compose up -d`). The app then shows an unlock screen and the API rejects every request without the key. Each browser is asked once per session: the key is kept until the browser is closed. If you change the key, browsers are sent back to the unlock screen.
+
+Without the variable the app is open to anyone who can reach it, which is only acceptable on a trusted network. If the app is reachable from the internet, also put it behind HTTPS, otherwise the key travels in plain text.
+
+### Gemini (optional)
+
+Contract labeling can use Google Gemini. Add your API key under **Settings** and pick a model from the list your key can use. The key is stored encrypted in the database (AES-256-GCM, with a per-install secret in `data/secret.key`) and is never sent back to the browser. A backup restored on another machine cannot decrypt it, so you enter the key again there. Without a key, contracts are labeled locally and nothing leaves your machine.
 
 ## Backup and restore
 
@@ -72,7 +78,7 @@ Copy `.env.example` to `.env`:
 See [API.md](./API.md) for the full endpoint catalog. Auth:
 
 ```http
-Authorization: Bearer <HAUSHALT_API_KEY>
+Authorization: Bearer <KEY>
 ```
 
 ## Privacy

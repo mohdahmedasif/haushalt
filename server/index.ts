@@ -1,14 +1,17 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import cors from "cors";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { accountFeeMonth, feeSpreadStart, learnRuleFrom, suggestCategory } from "../src/lib/categorize.ts";
+import { APP_NAME } from "../src/brand.ts";
 import { currentMonth, monthKey } from "../src/lib/dates.ts";
 import { parseSparkasseCsv } from "../src/lib/parseSparkasse.ts";
 import { buildInsights } from "../src/lib/insights.ts";
 import { detectContracts } from "../src/lib/contracts.ts";
-import { enrichContractsWithAI } from "../src/lib/ai.ts";
+import { defaultGeminiModel, enrichContractsWithAI, listGeminiModels } from "../src/lib/ai.ts";
+import { aiStatus, geminiApiKey, geminiConfig, setGeminiKey, setGeminiModel } from "./aiSettings.ts";
 import { buildForecast } from "../src/lib/forecast.ts";
 import { answerFinanceQuestion } from "../src/lib/ask.ts";
 import { summarizeMonth } from "../src/lib/summary.ts";
@@ -73,7 +76,8 @@ import {
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 loadEnv(join(root, ".env"));
 
-const API_KEY = process.env.HAUSHALT_API_KEY || "haushalt-local";
+/** Optional app password. Empty means the API is open. */
+const API_KEY = (process.env.KEY ?? "").trim();
 const HOST = process.env.HOST || "127.0.0.1";
 const PORT = Number(process.env.PORT || 8787);
 
@@ -84,20 +88,32 @@ repairSpreads();
 
 const app = express();
 app.use(cors());
+
+// Before the body parsers, so requests without the key are turned away unread.
+app.use("/api", (req: Request, res: Response, next: NextFunction) => {
+  if (!API_KEY) return next();
+  if (req.path === "/v1/health" || req.path === "/v1/auth") return next();
+  const header = req.header("authorization") || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : req.header("x-api-key") || "";
+  if (!keyMatches(token)) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  next();
+});
+
 // A full backup can outgrow the normal body limit; once parsed here the default parser skips it.
 app.use("/api/v1/backup/restore", express.json({ limit: "512mb" }));
 app.use(express.json({ limit: "12mb" }));
 
-app.use("/api", (req: Request, res: Response, next: NextFunction) => {
-  if (req.path === "/v1" && req.method === "GET") return next();
-  if (req.path === "/v1/health") return next();
-  const header = req.header("authorization") || "";
-  const token = header.startsWith("Bearer ") ? header.slice(7) : req.header("x-api-key") || "";
-  if (token !== API_KEY) {
-    res.status(401).json({ error: "Unauthorized. Send Authorization: Bearer <HAUSHALT_API_KEY>." });
-    return;
-  }
-  next();
+/** Constant-time: hashing first makes both sides the same length. */
+function keyMatches(token: string): boolean {
+  const digest = (value: string) => createHash("sha256").update(value).digest();
+  return timingSafeEqual(digest(token), digest(API_KEY));
+}
+
+app.get("/api/v1/auth", (_req, res) => {
+  res.json({ required: Boolean(API_KEY), name: APP_NAME });
 });
 
 app.get("/api/v1/health", (_req, res) => {
@@ -108,9 +124,10 @@ app.get("/api/v1", (_req, res) => {
   res.json({
     name: "Haushalt API",
     version: "v1",
-    auth: "Authorization: Bearer <HAUSHALT_API_KEY>",
+    auth: "Authorization: Bearer <KEY>",
     endpoints: [
       "GET /api/v1/health",
+      "GET /api/v1/auth",
       "GET /api/v1/summary?month=YYYY-MM",
       "GET /api/v1/account",
       "POST /api/v1/setup  { openingBalance, openingBalanceDate, openingCash?, onboarded? }",
@@ -146,6 +163,11 @@ app.get("/api/v1", (_req, res) => {
       "DELETE /api/v1/rules/:id",
       "POST /api/v1/rules/apply",
       "GET /api/v1/export",
+      "GET /api/v1/ai",
+      "GET /api/v1/ai/models",
+      "PUT /api/v1/ai/key  { apiKey }",
+      "DELETE /api/v1/ai/key",
+      "PATCH /api/v1/ai  { model }",
       "GET /api/v1/backup",
       "POST /api/v1/backup/restore  <backup file contents>",
     ],
@@ -667,14 +689,67 @@ app.get("/api/v1/insights", (req, res) => {
 
 app.get("/api/v1/contracts", async (_req, res) => {
   const detected = detectContracts(listTransactions());
-  const { contracts, provider } = await enrichContractsWithAI(detected);
+  const { contracts, provider } = await enrichContractsWithAI(detected, geminiConfig());
   res.json({ provider, contracts });
 });
 
 app.post("/api/v1/contracts/analyze", async (_req, res) => {
   const detected = detectContracts(listTransactions());
-  const { contracts, provider } = await enrichContractsWithAI(detected);
+  const { contracts, provider } = await enrichContractsWithAI(detected, geminiConfig());
   res.json({ provider, contracts });
+});
+
+app.get("/api/v1/ai", (_req, res) => {
+  res.json(aiStatus());
+});
+
+app.get("/api/v1/ai/models", async (_req, res) => {
+  const apiKey = geminiApiKey();
+  if (!apiKey) {
+    res.json([]);
+    return;
+  }
+  try {
+    res.json(await listGeminiModels(apiKey));
+  } catch (error) {
+    res.status(502).json({ error: error instanceof Error ? error.message : "Could not reach Gemini" });
+  }
+});
+
+app.put("/api/v1/ai/key", async (req, res) => {
+  const apiKey = String(req.body?.apiKey ?? "").trim();
+  if (!apiKey) {
+    res.status(400).json({ error: "apiKey is required" });
+    return;
+  }
+  try {
+    // Listing models doubles as the check that Gemini accepts the key.
+    const models = await listGeminiModels(apiKey);
+    setGeminiKey(apiKey);
+    const current = aiStatus().model;
+    if (!current || !models.some((m) => m.id === current)) {
+      const fallback = defaultGeminiModel(models);
+      if (fallback) setGeminiModel(fallback);
+    }
+    res.json({ status: aiStatus(), models });
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : "Gemini rejected this key" });
+  }
+});
+
+app.delete("/api/v1/ai/key", (_req, res) => {
+  setGeminiKey(null);
+  res.json(aiStatus());
+});
+
+app.patch("/api/v1/ai", (req, res) => {
+  const model = String(req.body?.model ?? "").trim();
+  if (!model) {
+    res.status(400).json({ error: "model is required" });
+    return;
+  }
+  setGeminiModel(model);
+  res.json(aiStatus());
 });
 
 app.get("/api/v1/forecast", (_req, res) => {
@@ -734,6 +809,7 @@ if (existsSync(dist)) {
 
 app.listen(PORT, HOST, () => {
   console.log(`Haushalt API http://${HOST}:${PORT}/api/v1`);
+  if (!API_KEY) console.warn("Warning: KEY is not set, so the API is open to anyone who can reach it.");
 });
 
 const GOLD_FORMS = new Set<GoldForm>(["bar", "coin", "jewelry", "other"]);

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { Alert, Spin, Typography } from "antd";
-import { api } from "./api";
+import { api, getAccessKey, onUnauthorized } from "./api";
 import { AppShell } from "./components/AppShell";
 import { useMonth, withMonth } from "./hooks/useMonth";
 import type {
@@ -23,11 +23,15 @@ import { GoldPage } from "./pages/Gold";
 import { ContractsPage } from "./pages/Contracts";
 import { ReportPage } from "./pages/Report";
 import { SetupWizard } from "./pages/SetupWizard";
+import { SettingsPage } from "./pages/Settings";
+import { UnlockScreen } from "./pages/Unlock";
 import type { DetectedContract } from "./lib/contracts";
 
 export function App() {
   const [ready, setReady] = useState(false);
   const [error, setError] = useState("");
+  const [authRequired, setAuthRequired] = useState(false);
+  const [locked, setLocked] = useState(false);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [people, setPeople] = useState<Person[]>([]);
@@ -74,8 +78,19 @@ export function App() {
     setReady(true);
   }, []);
 
+  useEffect(() => onUnauthorized(() => setLocked(true)), []);
+
   useEffect(() => {
-    reload().catch((err) => {
+    (async () => {
+      const auth = await api.authStatus();
+      setAuthRequired(auth.required);
+      if (auth.required && !getAccessKey()) {
+        setLocked(true);
+        setReady(true);
+        return;
+      }
+      await reload();
+    })().catch((err) => {
       setError(err instanceof Error ? err.message : "API is not running");
       setReady(true);
     });
@@ -88,6 +103,18 @@ export function App() {
           <div style={{ minHeight: 48 }} />
         </Spin>
       </div>
+    );
+  }
+
+  if (locked) {
+    return (
+      <UnlockScreen
+        onUnlocked={async () => {
+          setError("");
+          setLocked(false);
+          await reload();
+        }}
+      />
     );
   }
 
@@ -290,6 +317,7 @@ export function App() {
             />
           }
         />
+        <Route path="/settings" element={<SettingsPage authRequired={authRequired} onChanged={reload} />} />
         <Route path="*" element={<Navigate to={withMonth("/", month)} replace />} />
       </Route>
     </Routes>
