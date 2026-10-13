@@ -74,7 +74,7 @@ export function initAdminKey(): void {
 }
 
 function loadAdminKey(): string {
-  const fromEnv = (process.env.KEY ?? "").trim();
+  const fromEnv = (process.env.ADMIN_KEY ?? "").trim();
   if (fromEnv) return fromEnv;
   const file = join(dataDir, "admin.key");
   if (existsSync(file)) {

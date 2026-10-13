@@ -79,7 +79,7 @@ before(async () => {
   const port = await freePort();
   base = `http://127.0.0.1:${port}/api/v1`;
   server = spawn(process.execPath, ["--import", "tsx", "server/index.ts"], {
-    env: { ...process.env, HAUSHALT_DATA_DIR: dataDir, PORT: String(port), KEY: ADMIN_KEY, HOST: "127.0.0.1" },
+    env: { ...process.env, HAUSHALT_DATA_DIR: dataDir, PORT: String(port), ADMIN_KEY, HOST: "127.0.0.1" },
     stdio: "ignore",
   });
   for (let i = 0; i < 100; i++) {

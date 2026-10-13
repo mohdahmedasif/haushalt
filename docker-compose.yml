@@ -7,7 +7,7 @@ services:
     environment:
       HOST: "0.0.0.0"
       PORT: "8787"
-      KEY: ${KEY:-}
+      ADMIN_KEY: ${ADMIN_KEY:-}
       TRUST_PROXY: ${TRUST_PROXY:-}
     volumes:
       - ./data:/app/data

@@ -56,7 +56,7 @@ Copy `.env.example` to `.env`:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `KEY` | generated | Admin key for pairing devices and resetting PINs |
+| `ADMIN_KEY` | generated | Admin key for pairing devices and resetting PINs |
 | `PORT` | `8787` | Port the app is served on |
 | `TRUST_PROXY` | not set | Number of reverse proxies in front of the app, if any |
 
@@ -64,7 +64,7 @@ Copy `.env.example` to `.env`:
 
 Haushalt has two layers, so a stranger who finds the URL sees nothing and can guess nothing.
 
-1. **Pairing.** A browser must enter the admin key once before it can do anything at all, including seeing which profiles exist or trying a PIN. Set the key as `KEY` in `.env`; if you leave it unset, one is generated on first start and saved to `data/admin.key`. A paired browser stays paired for a year, renewed every time you unlock.
+1. **Pairing.** A browser must enter the admin key once before it can do anything at all, including seeing which profiles exist or trying a PIN. Set the key as `ADMIN_KEY` in `.env`; if you leave it unset, one is generated on first start and saved to `data/admin.key`. A paired browser stays paired for a year, renewed every time you unlock.
 2. **Profiles.** Each person has a profile with its own books and a PIN of 4 to 8 digits. Day to day you only type the PIN. Five wrong PINs lock the profile for 1 minute, then 5, 30 and 120 minutes for each further wrong one.
 
 The app locks itself after 5 minutes in the background or closed. **Lock now** and **Switch profile** are at the bottom of the menu. Under **Settings** you can change your PIN, unpair this device, unpair all other devices (for a lost phone) and delete the profile. A forgotten PIN is reset from the PIN screen with the admin key, which signs that profile out everywhere.
