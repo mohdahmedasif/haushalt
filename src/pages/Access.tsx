@@ -8,10 +8,20 @@ import type { Profile } from "../types";
 
 const PIN_RULE = /^\d{4,8}$/;
 
-function Card({ title, error, children }: { title: string; error?: string; children: ReactNode }) {
+function Card({
+  title,
+  error,
+  centered,
+  children,
+}: {
+  title: string;
+  error?: string;
+  centered?: boolean;
+  children: ReactNode;
+}) {
   return (
     <div className="wizard">
-      <div className="wizard-card">
+      <div className={centered ? "wizard-card centered" : "wizard-card"}>
         <div className="wizard-brand">
           <img src="/logo.svg" width={44} height={44} alt="" />
           <div className="wizard-kicker">{APP_NAME}</div>
@@ -97,7 +107,7 @@ export function ProfilePicker({
   onCreate: () => void;
 }) {
   return (
-    <Card title="Who is it?">
+    <Card title="Who is it?" centered>
       <div className="profile-grid">
         {profiles.map((profile) => (
           <button key={profile.id} type="button" className="profile-tile" onClick={() => onPick(profile)}>
@@ -230,7 +240,7 @@ export function PinScreen({
   }
 
   return (
-    <Card title={profile.name}>
+    <Card title={profile.name} centered>
       <div className="pin-status" role="status">
         {locked ? `Locked. Try again in ${countdown(lockedUntil - now)}` : note || "Enter your PIN"}
       </div>
