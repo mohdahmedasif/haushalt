@@ -3,14 +3,17 @@ import {
   FileTextOutlined,
   GoldOutlined,
   HomeOutlined,
+  LockOutlined,
   PieChartOutlined,
   SettingOutlined,
+  SwapOutlined,
   TableOutlined,
   UnorderedListOutlined,
   UploadOutlined,
   WalletOutlined,
 } from "@ant-design/icons";
-import { Menu } from "antd";
+import { Button, Menu } from "antd";
+import { useAccess } from "../access";
 import { PATHS } from "../nav";
 import { APP_NAME, APP_TAGLINE } from "../brand";
 
@@ -72,6 +75,7 @@ export function Sidebar({
   pathname: string;
   onNavigate: (path: string) => void;
 }) {
+  const { profile, lockNow, switchProfile } = useAccess();
   return (
     <>
       <Brand />
@@ -82,6 +86,15 @@ export function Sidebar({
         onClick={({ key }) => onNavigate(key)}
         className="app-menu"
       />
+      <div className="app-sidebar-foot">
+        <div className="app-sidebar-profile">{profile.name}</div>
+        <Button type="text" size="small" icon={<LockOutlined />} onClick={() => void lockNow()}>
+          Lock now
+        </Button>
+        <Button type="text" size="small" icon={<SwapOutlined />} onClick={() => void switchProfile()}>
+          Switch profile
+        </Button>
+      </div>
     </>
   );
 }

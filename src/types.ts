@@ -14,6 +14,8 @@ export type ViewId =
   | "report"
   | "settings";
 
+export type Profile = { id: string; name: string };
+
 export type AiStatus = {
   hasKey: boolean;
   /** Last four characters of the saved key. */

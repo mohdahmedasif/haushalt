@@ -9,74 +9,77 @@ import type {
   ImportPreviewRow,
   MonthSummary,
   Person,
+  Profile,
   Transaction,
 } from "./types";
 import type { Forecast } from "./lib/forecast";
 import type { AskAnswer } from "./lib/ask";
 import type { DetectedContract } from "./lib/contracts";
 
-const KEY_STORE = "haushalt.accessKey";
-
-/** The app password typed on the unlock screen. Kept for this browser session only. */
-export function getAccessKey(): string {
-  try {
-    return sessionStorage.getItem(KEY_STORE) ?? "";
-  } catch {
-    return "";
+/** A failed request, with the server's machine-readable code and any extra fields it sent. */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string,
+    readonly data: Record<string, unknown>,
+  ) {
+    super(message);
   }
 }
 
-function storeAccessKey(key: string): void {
-  try {
-    if (key) sessionStorage.setItem(KEY_STORE, key);
-    else sessionStorage.removeItem(KEY_STORE);
-  } catch {
-    // Storage blocked: the key just will not survive a reload.
-  }
-}
+type AccessLost = "unpaired" | "locked";
+let accessLost: (reason: AccessLost) => void = () => {};
 
-let unauthorized: () => void = () => {};
-
-/** Called whenever the server rejects the stored key, so the app can show the unlock screen. */
-export function onUnauthorized(handler: () => void): () => void {
-  unauthorized = handler;
+/** Called when the server says this device is no longer paired, or the profile is no longer unlocked. */
+export function onAccessLost(handler: (reason: AccessLost) => void): () => void {
+  accessLost = handler;
   return () => {
-    unauthorized = () => {};
+    accessLost = () => {};
   };
 }
 
-/** Keep the key only if the server accepts it. */
-export async function tryAccessKey(key: string): Promise<boolean> {
-  const res = await fetch("/api/v1/account", { headers: { Authorization: `Bearer ${key}` } });
-  if (res.status === 401) return false;
-  if (!res.ok) throw new Error(`Request failed: ${res.status}`);
-  storeAccessKey(key);
-  return true;
-}
-
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const key = getAccessKey();
   const res = await fetch(path, {
     ...init,
     headers: {
       "Content-Type": "application/json",
-      ...(key ? { Authorization: `Bearer ${key}` } : {}),
       ...(init?.headers ?? {}),
     },
   });
-  if (res.status === 401) {
-    storeAccessKey("");
-    unauthorized();
-  }
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body.error || `Request failed: ${res.status}`);
+    const body = (await res.json().catch(() => ({ error: res.statusText }))) as Record<string, unknown>;
+    if (body.code === "unpaired" || body.code === "locked") accessLost(body.code);
+    throw new ApiError(String(body.error || `Request failed: ${res.status}`), res.status, String(body.code ?? ""), body);
   }
   return res.json() as Promise<T>;
 }
 
 export const api = {
-  authStatus: () => request<{ required: boolean; name: string }>("/api/v1/auth"),
+  device: () => request<{ paired: boolean; name: string }>("/api/v1/device"),
+  pair: (adminKey: string) =>
+    request<{ paired: boolean }>("/api/v1/device/pair", { method: "POST", body: JSON.stringify({ adminKey }) }),
+  unpairThisDevice: () => request<{ paired: boolean }>("/api/v1/device", { method: "DELETE" }),
+  unpairOtherDevices: () => request<{ removed: number }>("/api/v1/devices/others", { method: "DELETE" }),
+  profiles: () => request<Profile[]>("/api/v1/profiles"),
+  createProfile: (name: string, pin: string) =>
+    request<Profile>("/api/v1/profiles", { method: "POST", body: JSON.stringify({ name, pin }) }),
+  unlock: (profileId: string, pin: string) =>
+    request<{ profile: Profile }>(`/api/v1/profiles/${profileId}/unlock`, {
+      method: "POST",
+      body: JSON.stringify({ pin }),
+    }),
+  resetPin: (profileId: string, adminKey: string, newPin: string) =>
+    request<{ ok: boolean }>(`/api/v1/profiles/${profileId}/reset-pin`, {
+      method: "POST",
+      body: JSON.stringify({ adminKey, newPin }),
+    }),
+  session: () => request<{ profile: Profile | null }>("/api/v1/session"),
+  lock: () => request<{ ok: boolean }>("/api/v1/session/lock", { method: "POST" }),
+  changePin: (currentPin: string, newPin: string) =>
+    request<{ ok: boolean }>("/api/v1/profile/pin", { method: "POST", body: JSON.stringify({ currentPin, newPin }) }),
+  deleteProfile: (pin: string) =>
+    request<{ ok: boolean }>("/api/v1/profile", { method: "DELETE", body: JSON.stringify({ pin }) }),
   summary: (month: string) => request<MonthSummary>(`/api/v1/summary?month=${month}`),
   categories: () => request<Category[]>("/api/v1/categories"),
   patchCategory: (id: string, patch: { budget?: number; name?: string; showInReport?: boolean }) =>

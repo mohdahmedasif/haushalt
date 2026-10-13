@@ -30,7 +30,8 @@
     "dev:api": "tsx watch server/index.ts",
     "dev:ui": "vite",
     "start": "tsx server/index.ts",
-    "build": "tsc -b && vite build"
+    "build": "tsc -b && vite build",
+    "test": "node --import tsx --test tests/*.test.ts"
   },
   "dependencies": {
     "@ant-design/icons": "^6.3.4",

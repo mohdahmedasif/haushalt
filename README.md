@@ -56,14 +56,24 @@ Copy `.env.example` to `.env`:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `KEY` | not set | Password for the app. Unset means open |
+| `KEY` | generated | Admin key for pairing devices and resetting PINs |
 | `PORT` | `8787` | Port the app is served on |
+| `TRUST_PROXY` | not set | Number of reverse proxies in front of the app, if any |
 
-### App password
+### Access: pairing and PINs
 
-Set `KEY` in `.env` and restart (with Docker: `docker compose up -d`). The app then shows an unlock screen and the API rejects every request without the key. Each browser is asked once per session: the key is kept until the browser is closed. If you change the key, browsers are sent back to the unlock screen.
+Haushalt has two layers, so a stranger who finds the URL sees nothing and can guess nothing.
 
-Without the variable the app is open to anyone who can reach it, which is only acceptable on a trusted network. If the app is reachable from the internet, also put it behind HTTPS, otherwise the key travels in plain text.
+1. **Pairing.** A browser must enter the admin key once before it can do anything at all, including seeing which profiles exist or trying a PIN. Set the key as `KEY` in `.env`; if you leave it unset, one is generated on first start and saved to `data/admin.key`. A paired browser stays paired for a year, renewed every time you unlock.
+2. **Profiles.** Each person has a profile with its own books and a PIN of 4 to 8 digits. Day to day you only type the PIN. Five wrong PINs lock the profile for 1 minute, then 5, 30 and 120 minutes for each further wrong one.
+
+The app locks itself after 5 minutes in the background or closed. **Lock now** and **Switch profile** are at the bottom of the menu. Under **Settings** you can change your PIN, unpair this device, unpair all other devices (for a lost phone) and delete the profile. A forgotten PIN is reset from the PIN screen with the admin key, which signs that profile out everywhere.
+
+Each profile's books are a separate database file under `data/profiles/`. If you are upgrading from a version without profiles, the first profile you create takes over the existing books.
+
+**HTTPS.** The pairing and session cookies are marked `Secure`, so browsers only keep them over HTTPS. Plain `http://` works on `localhost` only. To use the app from another device, put it behind HTTPS (a reverse proxy with a certificate, or Tailscale's HTTPS), and set `TRUST_PROXY` if a proxy is in front.
+
+**Behind a proxy without `TRUST_PROXY`,** rate limits become shared. The limit of 20 pairing attempts per 5 minutes counts everyone together instead of per visitor. Guessing is still capped just as hard, but someone hammering the pairing screen could block you from pairing a new device for a few minutes.
 
 ### Gemini (optional)
 
@@ -71,19 +81,19 @@ Contract labeling can use Google Gemini. Add your API key under **Settings** and
 
 ## Backup and restore
 
-**Import → Backup** downloads everything (bookings, categories, budgets, rules, people, cash, gold, settings) as one JSON file. On a fresh install, choose **Restore from a backup** on the welcome screen, or use **Import → Restore**, and upload that file to get the exact same state back. Restoring replaces whatever is in the app. The file holds your full bank history, so store it somewhere private.
+**Import → Backup** downloads everything in your profile (bookings, categories, budgets, rules, people, cash, gold, settings) as one JSON file. On a fresh install, choose **Restore from a backup** on the welcome screen, or use **Import → Restore**, and upload that file to get the exact same state back. Restoring replaces whatever is in that profile; other profiles, PINs and paired devices are not part of a backup. The file holds your full bank history, so store it somewhere private.
 
 ## API
 
-See [API.md](./API.md) for the full endpoint catalog. Auth:
+See [API.md](./API.md) for the endpoint catalog. The API is for the web app: every route needs a paired device, and data routes need an unlocked profile.
 
-```http
-Authorization: Bearer <KEY>
-```
+## Tests
+
+`npm test` starts the server on a temporary data folder and checks pairing, PIN lockout and that profiles cannot reach each other's data.
 
 ## Privacy
 
-- No cloud account; the ledger is a local SQLite file under `data/`
+- No cloud account; each profile is a local SQLite file under `data/`
 - `data/` and `.env` are gitignored — do not commit your bank history or API keys
 - Seeds in `src/data/` are generics for **new** installs only; they do not overwrite an existing database
 - Never paste CSVs, IBANs, or transaction dumps into issues or pull requests

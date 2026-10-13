@@ -3,9 +3,10 @@
 Local JSON API for the Haushalt web app.
 
 - Base: `http://127.0.0.1:8787/api/v1`
-- Auth: `Authorization: Bearer <KEY>` when `KEY` is set in `.env`; no auth when it is unset
-- Also accepted: `X-Api-Key: <KEY>`
-- Always public: `/health` and `/auth`
+- Access is by cookie, set by the server; there is no API key header
+- Open to anyone: `GET /device` and `POST /device/pair`
+- Everything else needs a paired device, or it answers `403 { "code": "unpaired" }`
+- Data routes also need an unlocked profile, or they answer `401 { "code": "locked" }`, and only ever see that profile's books
 
 Start both UI and API from the repo root:
 
@@ -22,7 +23,18 @@ Catalog: `GET /api/v1`
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/health` | Liveness |
-| GET | `/auth` | `{ required, name }` Whether a key is needed |
+| GET | `/device` | `{ paired, name }` |
+| POST | `/device/pair` | `{ "adminKey" }` Pairs this browser. 20 tries per 5 minutes per address |
+| DELETE | `/device` | Unpair this browser |
+| DELETE | `/devices/others` | Unpair every other browser (needs an unlocked profile) |
+| GET | `/profiles` | `[{ id, name }]` |
+| POST | `/profiles` | `{ "name", "pin" }` PIN is 4 to 8 digits |
+| POST | `/profiles/:id/unlock` | `{ "pin" }` On failure: `wrong_pin` with `attemptsLeft`, or `locked_out` with `lockedUntil` |
+| POST | `/profiles/:id/reset-pin` | `{ "adminKey", "newPin" }` Signs the profile out everywhere |
+| GET | `/session` | `{ profile }` or `{ profile: null }` |
+| POST | `/session/lock` | End this session |
+| POST | `/profile/pin` | `{ "currentPin", "newPin" }` |
+| DELETE | `/profile` | `{ "pin" }` Deletes the unlocked profile and its books |
 | GET | `/summary?month=2026-09` | Income, expense, leftover, cash on hand, per-category |
 | GET | `/categories` | Category list + budgets |
 | POST | `/categories` | `{ "name": "Pets", "kind": "expense", "budget": 50 }` |
@@ -51,11 +63,3 @@ Catalog: `GET /api/v1`
 | GET | `/backup` | Full backup: every table and column as one JSON file |
 | POST | `/backup/restore` | Body = a backup file. Replaces the whole database with it |
 | POST | `/ask` | `{ "question": "How much until payday?", "month?": "2026-09" }` |
-
-Telegram later can call the same routes, for example:
-
-- “how much cash?” → `GET /cash`
-- “spent 12 leisure” → `POST /cash/movements` `{ "type": "out", "amount": 12, "categoryId": "leisure", "date": "2026-09-20" }`
-- “month left?” → `GET /summary?month=2026-09`
-- “until payday?” → `GET /forecast` or `POST /ask` `{ "question": "How much until payday?" }`
-- “contracts?” → `GET /contracts`

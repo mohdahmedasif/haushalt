@@ -1,8 +1,6 @@
-import { createHash, timingSafeEqual } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import cors from "cors";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { accountFeeMonth, feeSpreadStart, learnRuleFrom, suggestCategory } from "../src/lib/categorize.ts";
 import { APP_NAME } from "../src/brand.ts";
@@ -62,58 +60,248 @@ import {
   currentBankBalance,
   currentBankBalanceAsOf,
   resetLedger,
-  seedIfEmpty,
-  ensureSeedCategories,
-  repairAccountFeeMonths,
-  repairSpreads,
   updateCategory,
   deleteCategory,
   updateTransaction,
   exportBackup,
   restoreBackup,
+  withProfile,
+  repairSpreads,
 } from "./db.ts";
+import {
+  DEVICE_TTL_MS,
+  SESSION_TTL_MS,
+  adminKeyMatches,
+  changePin,
+  createProfile,
+  deleteProfile,
+  endSession,
+  findDevice,
+  findSession,
+  getProfile,
+  initAdminKey,
+  listProfiles,
+  pairDevice,
+  resetPin,
+  unlockProfile,
+  unpairDevice,
+  unpairOtherDevices,
+  validPin,
+  type Device,
+} from "./auth.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 loadEnv(join(root, ".env"));
 
-/** Optional app password. Empty means the API is open. */
-const API_KEY = (process.env.KEY ?? "").trim();
 const HOST = process.env.HOST || "127.0.0.1";
 const PORT = Number(process.env.PORT || 8787);
+initAdminKey();
 
-seedIfEmpty();
-ensureSeedCategories();
-repairAccountFeeMonths();
-repairSpreads();
+const DEVICE_COOKIE = "haushalt_device";
+const SESSION_COOKIE = "haushalt_session";
 
 const app = express();
-app.use(cors());
+// Behind a reverse proxy, lets rate limiting see the visitor's address instead of the proxy's.
+const trustProxy = (process.env.TRUST_PROXY ?? "").trim();
+if (trustProxy) app.set("trust proxy", /^\d+$/.test(trustProxy) ? Number(trustProxy) : trustProxy === "true" ? 1 : trustProxy);
 
-// Before the body parsers, so requests without the key are turned away unread.
-app.use("/api", (req: Request, res: Response, next: NextFunction) => {
-  if (!API_KEY) return next();
-  if (req.path === "/v1/health" || req.path === "/v1/auth") return next();
-  const header = req.header("authorization") || "";
-  const token = header.startsWith("Bearer ") ? header.slice(7) : req.header("x-api-key") || "";
-  if (!keyMatches(token)) {
-    res.status(401).json({ error: "Unauthorized" });
+function readCookie(req: Request, name: string): string {
+  for (const part of (req.headers.cookie ?? "").split(";")) {
+    const eq = part.indexOf("=");
+    if (eq > 0 && part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
+  }
+  return "";
+}
+
+/** Browsers only keep Secure cookies over HTTPS, with localhost as the one exception. */
+function isLocalhost(req: Request): boolean {
+  return ["localhost", "127.0.0.1", "::1", "[::1]"].includes(req.hostname);
+}
+
+function setCookie(req: Request, res: Response, name: string, value: string, maxAge: number): void {
+  res.cookie(name, value, { httpOnly: true, sameSite: "strict", secure: !isLocalhost(req), maxAge, path: "/" });
+}
+
+function clearCookie(req: Request, res: Response, name: string): void {
+  res.clearCookie(name, { httpOnly: true, sameSite: "strict", secure: !isLocalhost(req), path: "/" });
+}
+
+function rateLimit(max: number, windowMs: number) {
+  const hits = new Map<string, number[]>();
+  return (req: Request, res: Response, next: NextFunction) => {
+    const now = Date.now();
+    if (hits.size > 10_000) {
+      for (const [ip, times] of hits) if (times.every((t) => now - t >= windowMs)) hits.delete(ip);
+    }
+    const ip = req.ip ?? "unknown";
+    const recent = (hits.get(ip) ?? []).filter((t) => now - t < windowMs);
+    if (recent.length >= max) {
+      res.status(429).json({
+        error: "Too many attempts. Try again in a few minutes.",
+        code: "rate_limited",
+        retryAfter: Math.ceil((recent[0] + windowMs - now) / 1000),
+      });
+      return;
+    }
+    recent.push(now);
+    hits.set(ip, recent);
+    next();
+  };
+}
+
+const adminKeyLimit = rateLimit(20, 5 * 60_000);
+const unlockLimit = rateLimit(40, 5 * 60_000);
+const smallJson = express.json({ limit: "16kb" });
+
+// ---------- Open to anyone: only "am I paired?" and "pair".
+
+app.get("/api/v1/device", (req, res) => {
+  res.json({ paired: Boolean(findDevice(readCookie(req, DEVICE_COOKIE))), name: APP_NAME });
+});
+
+app.post("/api/v1/device/pair", adminKeyLimit, smallJson, (req, res) => {
+  if (!adminKeyMatches(String(req.body?.adminKey ?? ""))) {
+    res.status(403).json({ error: "That admin key was not accepted.", code: "bad_admin_key" });
     return;
   }
+  setCookie(req, res, DEVICE_COOKIE, pairDevice(req.header("user-agent") ?? ""), DEVICE_TTL_MS);
+  res.json({ paired: true });
+});
+
+// ---------- Everything below needs a paired device. Routes are matched in order, so any
+// path that is not one of the two above, however it is spelled or encoded, stops here.
+
+app.use("/api", (req: Request, res: Response, next: NextFunction) => {
+  const device = findDevice(readCookie(req, DEVICE_COOKIE));
+  if (!device) {
+    res.status(403).json({ error: "This device is not paired.", code: "unpaired" });
+    return;
+  }
+  res.locals.device = device;
   next();
 });
 
 // A full backup can outgrow the normal body limit; once parsed here the default parser skips it.
 app.use("/api/v1/backup/restore", express.json({ limit: "512mb" }));
-app.use(express.json({ limit: "12mb" }));
+app.use("/api", express.json({ limit: "12mb" }));
 
-/** Constant-time: hashing first makes both sides the same length. */
-function keyMatches(token: string): boolean {
-  const digest = (value: string) => createHash("sha256").update(value).digest();
-  return timingSafeEqual(digest(token), digest(API_KEY));
-}
+app.delete("/api/v1/device", (req, res) => {
+  unpairDevice((res.locals.device as Device).id);
+  clearCookie(req, res, DEVICE_COOKIE);
+  clearCookie(req, res, SESSION_COOKIE);
+  res.json({ paired: false });
+});
 
-app.get("/api/v1/auth", (_req, res) => {
-  res.json({ required: Boolean(API_KEY), name: APP_NAME });
+app.get("/api/v1/profiles", (_req, res) => {
+  res.json(listProfiles());
+});
+
+app.post("/api/v1/profiles", (req, res) => {
+  const name = String(req.body?.name ?? "").trim();
+  const pin = req.body?.pin;
+  if (!name || name.length > 40) {
+    res.status(400).json({ error: "Give the profile a name of up to 40 characters." });
+    return;
+  }
+  if (!validPin(pin)) {
+    res.status(400).json({ error: "The PIN must be 4 to 8 digits." });
+    return;
+  }
+  try {
+    res.json(createProfile(name, pin));
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : "Could not create the profile" });
+  }
+});
+
+app.post("/api/v1/profiles/:id/unlock", unlockLimit, (req, res) => {
+  const device = res.locals.device as Device;
+  const result = unlockProfile(String(req.params.id), String(req.body?.pin ?? ""), device.id);
+  if (result.ok) {
+    setCookie(req, res, SESSION_COOKIE, result.sessionToken, SESSION_TTL_MS);
+    // Re-issued on every unlock, so devices in use stay paired.
+    setCookie(req, res, DEVICE_COOKIE, readCookie(req, DEVICE_COOKIE), DEVICE_TTL_MS);
+    res.json({ profile: result.profile });
+    return;
+  }
+  if (result.code === "not_found") {
+    res.status(404).json({ error: "That profile does not exist.", code: "not_found" });
+  } else if (result.code === "locked_out") {
+    res.status(423).json({ error: "This profile is locked.", code: "locked_out", lockedUntil: result.lockedUntil });
+  } else {
+    res.status(401).json({
+      error: "Wrong PIN.",
+      code: "wrong_pin",
+      attemptsLeft: result.attemptsLeft,
+      lockedUntil: result.lockedUntil,
+    });
+  }
+});
+
+app.post("/api/v1/profiles/:id/reset-pin", adminKeyLimit, (req, res) => {
+  if (!adminKeyMatches(String(req.body?.adminKey ?? ""))) {
+    res.status(403).json({ error: "That admin key was not accepted.", code: "bad_admin_key" });
+    return;
+  }
+  const newPin = req.body?.newPin;
+  if (!validPin(newPin)) {
+    res.status(400).json({ error: "The PIN must be 4 to 8 digits." });
+    return;
+  }
+  if (!resetPin(String(req.params.id), newPin)) {
+    res.status(404).json({ error: "That profile does not exist.", code: "not_found" });
+    return;
+  }
+  res.json({ ok: true });
+});
+
+app.get("/api/v1/session", (req, res) => {
+  const session = findSession(readCookie(req, SESSION_COOKIE), (res.locals.device as Device).id);
+  res.json({ profile: session ? getProfile(session.profileId) : null });
+});
+
+// ---------- Everything below needs an unlocked profile, and only ever sees that profile's ledger.
+
+app.use("/api", (req: Request, res: Response, next: NextFunction) => {
+  const session = findSession(readCookie(req, SESSION_COOKIE), (res.locals.device as Device).id);
+  if (!session) {
+    res.status(401).json({ error: "Unlock a profile first.", code: "locked" });
+    return;
+  }
+  res.locals.profileId = session.profileId;
+  withProfile(session.profileId, next);
+});
+
+app.post("/api/v1/session/lock", (req, res) => {
+  endSession(readCookie(req, SESSION_COOKIE));
+  clearCookie(req, res, SESSION_COOKIE);
+  res.json({ ok: true });
+});
+
+app.delete("/api/v1/devices/others", (_req, res) => {
+  res.json({ removed: unpairOtherDevices((res.locals.device as Device).id) });
+});
+
+app.post("/api/v1/profile/pin", (req, res) => {
+  const newPin = req.body?.newPin;
+  if (!validPin(newPin)) {
+    res.status(400).json({ error: "The new PIN must be 4 to 8 digits." });
+    return;
+  }
+  if (!changePin(String(res.locals.profileId), String(req.body?.currentPin ?? ""), newPin)) {
+    res.status(403).json({ error: "The current PIN is not right.", code: "wrong_pin" });
+    return;
+  }
+  res.json({ ok: true });
+});
+
+app.delete("/api/v1/profile", (req, res) => {
+  if (!deleteProfile(String(res.locals.profileId), String(req.body?.pin ?? ""))) {
+    res.status(403).json({ error: "The PIN is not right.", code: "wrong_pin" });
+    return;
+  }
+  clearCookie(req, res, SESSION_COOKIE);
+  res.json({ ok: true });
 });
 
 app.get("/api/v1/health", (_req, res) => {
@@ -124,10 +312,21 @@ app.get("/api/v1", (_req, res) => {
   res.json({
     name: "Haushalt API",
     version: "v1",
-    auth: "Authorization: Bearer <KEY>",
+    auth: "Paired device cookie, then an unlocked profile",
     endpoints: [
+      "GET /api/v1/device",
+      "POST /api/v1/device/pair  { adminKey }",
+      "DELETE /api/v1/device",
+      "DELETE /api/v1/devices/others",
+      "GET /api/v1/profiles",
+      "POST /api/v1/profiles  { name, pin }",
+      "POST /api/v1/profiles/:id/unlock  { pin }",
+      "POST /api/v1/profiles/:id/reset-pin  { adminKey, newPin }",
+      "GET /api/v1/session",
+      "POST /api/v1/session/lock",
+      "POST /api/v1/profile/pin  { currentPin, newPin }",
+      "DELETE /api/v1/profile  { pin }",
       "GET /api/v1/health",
-      "GET /api/v1/auth",
       "GET /api/v1/summary?month=YYYY-MM",
       "GET /api/v1/account",
       "POST /api/v1/setup  { openingBalance, openingBalanceDate, openingCash?, onboarded? }",
@@ -799,6 +998,10 @@ app.post("/api/v1/backup/restore", (req, res) => {
   }
 });
 
+app.use("/api", (_req, res) => {
+  res.status(404).json({ error: "Not found" });
+});
+
 const dist = join(root, "dist");
 if (existsSync(dist)) {
   app.use(express.static(dist));
@@ -809,7 +1012,6 @@ if (existsSync(dist)) {
 
 app.listen(PORT, HOST, () => {
   console.log(`Haushalt API http://${HOST}:${PORT}/api/v1`);
-  if (!API_KEY) console.warn("Warning: KEY is not set, so the API is open to anyone who can reach it.");
 });
 
 const GOLD_FORMS = new Set<GoldForm>(["bar", "coin", "jewelry", "other"]);

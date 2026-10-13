@@ -1,22 +1,14 @@
 import { useEffect, useState } from "react";
 import { Alert, Button, Input, Popconfirm, Select, Space, Typography } from "antd";
-import { api, tryAccessKey } from "../api";
+import { api } from "../api";
+import { ProfileCard } from "../ui/ProfileCard";
 import { PageHeader } from "../ui/PageHeader";
 import { SectionCard } from "../ui/SectionCard";
 import type { AiStatus } from "../types";
 
 type Model = { id: string; name: string };
 
-export function SettingsPage({
-  authRequired,
-  onChanged,
-}: {
-  authRequired: boolean;
-  onChanged: () => Promise<void>;
-}) {
-  const [accessKey, setAccessKey] = useState("");
-  const [accessBusy, setAccessBusy] = useState(false);
-  const [accessResult, setAccessResult] = useState<{ ok: boolean; text: string } | null>(null);
+export function SettingsPage({ onChanged }: { onChanged: () => Promise<void> }) {
   const [status, setStatus] = useState<AiStatus | null>(null);
   const [models, setModels] = useState<Model[]>([]);
   const [apiKey, setApiKey] = useState("");
@@ -69,55 +61,11 @@ export function SettingsPage({
     });
   }
 
-  async function replaceAccessKey() {
-    if (!accessKey.trim()) return;
-    setAccessBusy(true);
-    setAccessResult(null);
-    try {
-      if (await tryAccessKey(accessKey.trim())) {
-        setAccessKey("");
-        setAccessResult({ ok: true, text: "This browser now uses the new key." });
-      } else {
-        setAccessResult({ ok: false, text: "That key was not accepted. Check it and try again." });
-      }
-    } catch (err) {
-      setAccessResult({ ok: false, text: err instanceof Error ? err.message : "Could not reach the app" });
-    } finally {
-      setAccessBusy(false);
-    }
-  }
-
   return (
     <>
-      <PageHeader title="Settings">Connections and keys for this install.</PageHeader>
+      <PageHeader title="Settings">Your profile, paired devices and connections.</PageHeader>
 
-      <SectionCard title="App access key">
-        <Typography.Paragraph type="secondary">
-          The password for this app itself, set on the server as KEY. This browser remembers it until you
-          close it.{" "}
-          {authRequired
-            ? "If the key was changed on the server, enter the new one here."
-            : "No key is set on the server, so the app is open to anyone who can reach it."}
-        </Typography.Paragraph>
-        {accessResult && (
-          <Alert className="import-result" type={accessResult.ok ? "success" : "error"} message={accessResult.text} />
-        )}
-        {authRequired && (
-          <Space wrap>
-            <Input.Password
-              style={{ width: 340 }}
-              value={accessKey}
-              onChange={(e) => setAccessKey(e.target.value)}
-              placeholder="New access key"
-              autoComplete="off"
-              onPressEnter={() => void replaceAccessKey()}
-            />
-            <Button loading={accessBusy} disabled={!accessKey.trim()} onClick={() => void replaceAccessKey()}>
-              Use this key
-            </Button>
-          </Space>
-        )}
-      </SectionCard>
+      <ProfileCard />
 
       <SectionCard title="Gemini">
         <Typography.Paragraph type="secondary">

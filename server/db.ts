@@ -1,4 +1,5 @@
-import { mkdirSync } from "node:fs";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
@@ -37,124 +38,187 @@ function defaultSettings(): AppSettings {
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 /** Runtime store only — created and seeded by the API on first start. Do not check in. */
-export const dataDir = join(root, "data");
-mkdirSync(dataDir, { recursive: true });
+export const dataDir = process.env.HAUSHALT_DATA_DIR || join(root, "data");
+const profilesDir = join(dataDir, "profiles");
+mkdirSync(profilesDir, { recursive: true });
 
-export const db = new DatabaseSync(join(dataDir, "haushalt.sqlite"));
-db.exec("PRAGMA journal_mode = WAL");
-db.exec("PRAGMA foreign_keys = ON");
+const scope = new AsyncLocalStorage<DatabaseSync>();
+const ledgers = new Map<string, DatabaseSync>();
 
-db.exec(`
-CREATE TABLE IF NOT EXISTS categories (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  budget REAL NOT NULL,
-  color TEXT NOT NULL,
-  sort INTEGER NOT NULL,
-  exclude_from_budget INTEGER NOT NULL,
-  show_in_report INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS transactions (
-  id TEXT PRIMARY KEY,
-  fingerprint TEXT NOT NULL UNIQUE,
-  account_iban TEXT,
-  booking_date TEXT,
-  value_date TEXT,
-  month TEXT,
-  booking_text TEXT,
-  purpose TEXT,
-  counterparty TEXT,
-  iban TEXT,
-  bic TEXT,
-  amount REAL NOT NULL,
-  currency TEXT,
-  end_to_end_ref TEXT,
-  mandate_ref TEXT,
-  creditor_id TEXT,
-  info TEXT,
-  category_id TEXT,
-  splits TEXT NOT NULL DEFAULT '[]',
-  spread_months INTEGER NOT NULL DEFAULT 1,
-  spread_start TEXT,
-  excluded INTEGER NOT NULL DEFAULT 0,
-  notes TEXT,
-  loan_person_id TEXT,
-  loan_direction TEXT,
-  loan_origin_id TEXT,
-  import_id TEXT,
-  source TEXT NOT NULL DEFAULT 'bank',
-  created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS rules (
-  id TEXT PRIMARY KEY,
-  priority INTEGER NOT NULL,
-  category_id TEXT NOT NULL,
-  field TEXT NOT NULL,
-  match TEXT NOT NULL,
-  value TEXT NOT NULL,
-  note TEXT,
-  learned INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS people (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  role TEXT NOT NULL,
-  aliases TEXT NOT NULL,
-  ibans TEXT NOT NULL,
-  notes TEXT
-);
-CREATE TABLE IF NOT EXISTS imports (
-  id TEXT PRIMARY KEY,
-  file_name TEXT NOT NULL,
-  imported_at TEXT NOT NULL,
-  added INTEGER NOT NULL,
-  duplicates INTEGER NOT NULL,
-  skipped INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS cash_movements (
-  id TEXT PRIMARY KEY,
-  type TEXT NOT NULL,
-  amount REAL NOT NULL,
-  date TEXT NOT NULL,
-  month TEXT NOT NULL,
-  category_id TEXT,
-  note TEXT,
-  transaction_id TEXT,
-  created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS gold_lots (
-  id TEXT PRIMARY KEY,
-  purchased_at TEXT NOT NULL,
-  grams REAL NOT NULL,
-  purity TEXT NOT NULL,
-  form TEXT NOT NULL,
-  dealer TEXT,
-  invoice_ref TEXT,
-  total_paid REAL NOT NULL,
-  price_per_gram REAL NOT NULL,
-  note TEXT,
-  pieces TEXT NOT NULL DEFAULT '[]',
-  created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS settings (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-`);
+/**
+ * The ledger of the profile whose request is running. Every profile has its own
+ * database file, so no query can reach another profile's data.
+ */
+export const db = new Proxy({} as DatabaseSync, {
+  get(_target, prop) {
+    const ledger = scope.getStore();
+    if (!ledger) throw new Error("No profile is in scope");
+    const value = Reflect.get(ledger, prop);
+    return typeof value === "function" ? value.bind(ledger) : value;
+  },
+});
 
-ensureColumn("transactions", "loan_origin_id", "TEXT");
-ensureColumn("transactions", "reimburse_amount", "REAL NOT NULL DEFAULT 0");
-db.exec(`UPDATE transactions SET reimburse_amount = ABS(amount)
-  WHERE reimburse_amount = 0 AND amount < 0 AND category_id IN ('loan_out', 'money_back')`);
-db.exec(`UPDATE transactions SET category_id = NULL WHERE category_id = 'money_back'`);
-db.exec(`UPDATE transactions SET category_id = 'reimbursement'
-  WHERE category_id = 'loan_in' AND loan_origin_id IN (
-    SELECT id FROM transactions
-    WHERE IFNULL(category_id, '') <> 'loan_out' AND splits NOT LIKE '%"loan_out"%'
-  )`);
-ensureColumn("gold_lots", "pieces", "TEXT");
-const addedShowInReport = ensureColumn("categories", "show_in_report", "INTEGER NOT NULL DEFAULT 0");
+function ledgerFile(profileId: string): string {
+  return join(profilesDir, `${profileId}.sqlite`);
+}
+
+function ledgerFor(profileId: string): DatabaseSync {
+  let ledger = ledgers.get(profileId);
+  if (!ledger) {
+    ledger = new DatabaseSync(ledgerFile(profileId));
+    ledgers.set(profileId, ledger);
+    scope.run(ledger, () => {
+      initLedger();
+      backfillGoldPieces();
+      seedIfEmpty();
+      ensureSeedCategories();
+      repairAccountFeeMonths();
+      repairSpreads();
+    });
+  }
+  return ledger;
+}
+
+/** Run `fn` with `db` pointing at this profile's ledger. */
+export function withProfile<T>(profileId: string, fn: () => T): T {
+  return scope.run(ledgerFor(profileId), fn);
+}
+
+/** Hand the single ledger from before profiles existed to the first profile. */
+export function adoptLegacyLedger(profileId: string): void {
+  const legacy = join(dataDir, "haushalt.sqlite");
+  if (!existsSync(legacy) || existsSync(ledgerFile(profileId))) return;
+  const old = new DatabaseSync(legacy);
+  old.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  old.close();
+  renameSync(legacy, ledgerFile(profileId));
+}
+
+export function deleteLedger(profileId: string): void {
+  ledgers.get(profileId)?.close();
+  ledgers.delete(profileId);
+  for (const suffix of ["", "-wal", "-shm"]) rmSync(ledgerFile(profileId) + suffix, { force: true });
+}
+
+let addedShowInReport = false;
+
+/** Create or upgrade the tables of the ledger in scope. */
+function initLedger(): void {
+  db.exec("PRAGMA journal_mode = WAL");
+  db.exec("PRAGMA foreign_keys = ON");
+
+  db.exec(`
+  CREATE TABLE IF NOT EXISTS categories (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    budget REAL NOT NULL,
+    color TEXT NOT NULL,
+    sort INTEGER NOT NULL,
+    exclude_from_budget INTEGER NOT NULL,
+    show_in_report INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE TABLE IF NOT EXISTS transactions (
+    id TEXT PRIMARY KEY,
+    fingerprint TEXT NOT NULL UNIQUE,
+    account_iban TEXT,
+    booking_date TEXT,
+    value_date TEXT,
+    month TEXT,
+    booking_text TEXT,
+    purpose TEXT,
+    counterparty TEXT,
+    iban TEXT,
+    bic TEXT,
+    amount REAL NOT NULL,
+    currency TEXT,
+    end_to_end_ref TEXT,
+    mandate_ref TEXT,
+    creditor_id TEXT,
+    info TEXT,
+    category_id TEXT,
+    splits TEXT NOT NULL DEFAULT '[]',
+    spread_months INTEGER NOT NULL DEFAULT 1,
+    spread_start TEXT,
+    excluded INTEGER NOT NULL DEFAULT 0,
+    notes TEXT,
+    loan_person_id TEXT,
+    loan_direction TEXT,
+    loan_origin_id TEXT,
+    import_id TEXT,
+    source TEXT NOT NULL DEFAULT 'bank',
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS rules (
+    id TEXT PRIMARY KEY,
+    priority INTEGER NOT NULL,
+    category_id TEXT NOT NULL,
+    field TEXT NOT NULL,
+    match TEXT NOT NULL,
+    value TEXT NOT NULL,
+    note TEXT,
+    learned INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE TABLE IF NOT EXISTS people (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    role TEXT NOT NULL,
+    aliases TEXT NOT NULL,
+    ibans TEXT NOT NULL,
+    notes TEXT
+  );
+  CREATE TABLE IF NOT EXISTS imports (
+    id TEXT PRIMARY KEY,
+    file_name TEXT NOT NULL,
+    imported_at TEXT NOT NULL,
+    added INTEGER NOT NULL,
+    duplicates INTEGER NOT NULL,
+    skipped INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS cash_movements (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL,
+    amount REAL NOT NULL,
+    date TEXT NOT NULL,
+    month TEXT NOT NULL,
+    category_id TEXT,
+    note TEXT,
+    transaction_id TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS gold_lots (
+    id TEXT PRIMARY KEY,
+    purchased_at TEXT NOT NULL,
+    grams REAL NOT NULL,
+    purity TEXT NOT NULL,
+    form TEXT NOT NULL,
+    dealer TEXT,
+    invoice_ref TEXT,
+    total_paid REAL NOT NULL,
+    price_per_gram REAL NOT NULL,
+    note TEXT,
+    pieces TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+  `);
+
+  ensureColumn("transactions", "loan_origin_id", "TEXT");
+  ensureColumn("transactions", "reimburse_amount", "REAL NOT NULL DEFAULT 0");
+  db.exec(`UPDATE transactions SET reimburse_amount = ABS(amount)
+    WHERE reimburse_amount = 0 AND amount < 0 AND category_id IN ('loan_out', 'money_back')`);
+  db.exec(`UPDATE transactions SET category_id = NULL WHERE category_id = 'money_back'`);
+  db.exec(`UPDATE transactions SET category_id = 'reimbursement'
+    WHERE category_id = 'loan_in' AND loan_origin_id IN (
+      SELECT id FROM transactions
+      WHERE IFNULL(category_id, '') <> 'loan_out' AND splits NOT LIKE '%"loan_out"%'
+    )`);
+  ensureColumn("gold_lots", "pieces", "TEXT");
+  addedShowInReport = ensureColumn("categories", "show_in_report", "INTEGER NOT NULL DEFAULT 0");
+}
 
 function ensureColumn(table: string, name: string, spec: string): boolean {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
@@ -753,7 +817,6 @@ function backfillGoldPieces(): void {
   }
 }
 
-backfillGoldPieces();
 
 function rowToGoldLot(r: Record<string, unknown>): GoldLot {
   const pieces = goldPiecesFromRow(r);
