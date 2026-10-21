@@ -8,7 +8,7 @@ import { currentMonth, monthKey } from "../src/lib/dates.ts";
 import { parseSparkasseCsv } from "../src/lib/parseSparkasse.ts";
 import { buildInsights } from "../src/lib/insights.ts";
 import { detectContracts } from "../src/lib/contracts.ts";
-import { defaultGeminiModel, enrichContractsWithAI, listGeminiModels } from "../src/lib/ai.ts";
+import { defaultGeminiModel, enrichContractsWithAI, labelContractsFromCache, listGeminiModels } from "../src/lib/ai.ts";
 import { aiStatus, geminiApiKey, geminiConfig, setGeminiKey, setGeminiModel } from "./aiSettings.ts";
 import { buildForecast } from "../src/lib/forecast.ts";
 import { answerFinanceQuestion } from "../src/lib/ask.ts";
@@ -886,10 +886,11 @@ app.get("/api/v1/insights", (req, res) => {
   res.json(buildInsights(year, listTransactions(), listCategories()));
 });
 
-app.get("/api/v1/contracts", async (_req, res) => {
+// Loaded on every page load and after every change, so it never waits on Gemini.
+// Asking Gemini happens only on Refresh (POST /contracts/analyze).
+app.get("/api/v1/contracts", (_req, res) => {
   const detected = detectContracts(listTransactions());
-  const { contracts, provider } = await enrichContractsWithAI(detected, geminiConfig());
-  res.json({ provider, contracts });
+  res.json(labelContractsFromCache(detected, geminiConfig()));
 });
 
 app.post("/api/v1/contracts/analyze", async (_req, res) => {

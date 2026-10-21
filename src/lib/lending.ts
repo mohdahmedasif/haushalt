@@ -200,15 +200,19 @@ export function reimburseAfterLink(origin: Transaction, incoming: Transaction, l
 }
 
 /** Incoming bookings you can attach as returns for this lent origin. */
+/** Money handed over to pass on can arrive before the payment it covers. */
+const EARLY_RETURN_DAYS = 30;
+
 export function candidateReturnBookings(origin: Transaction, ledger: Transaction[]): Transaction[] {
   const originDate = origin.valueDate || origin.bookingDate || "";
+  const earliest = originDate ? shiftDays(originDate, -EARLY_RETURN_DAYS) : "";
   return ledger
     .filter((tx) => {
       if (tx.id === origin.id || tx.excluded || tx.amount <= 0) return false;
       if (tx.loanOriginId && tx.loanOriginId !== origin.id) return false;
       if (tx.loanOriginId === origin.id) return false;
       const date = tx.valueDate || tx.bookingDate || "";
-      if (originDate && date && date < originDate) return false;
+      if (earliest && date && date < earliest) return false;
       return true;
     })
     .sort((a, b) => {
@@ -370,4 +374,10 @@ function line(tx: Transaction, direction: "lent" | "repaid", amount: number): Le
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+function shiftDays(isoDate: string, days: number): string {
+  const date = new Date(`${isoDate.slice(0, 10)}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
 }

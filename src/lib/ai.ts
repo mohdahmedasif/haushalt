@@ -21,6 +21,25 @@ export async function enrichContractsWithAI(
     }
   }
 
+  return localLabels(contracts);
+}
+
+/**
+ * For page loads: never waits on Gemini. Uses the last Gemini answer if the
+ * contracts have not changed since, otherwise the local labels.
+ */
+export function labelContractsFromCache(
+  contracts: DetectedContract[],
+  gemini: GeminiConfig | null,
+): { contracts: DetectedContract[]; provider: string } {
+  if (gemini && lastAnswer?.request === requestKey(gemini, contracts)) {
+    const provider = `gemini:${gemini.model}`;
+    return { contracts: mergeAi(contracts, lastAnswer.text, provider), provider };
+  }
+  return localLabels(contracts);
+}
+
+function localLabels(contracts: DetectedContract[]): { contracts: DetectedContract[]; provider: string } {
   return {
     contracts: contracts.map((c) => ({
       ...c,
@@ -28,6 +47,10 @@ export async function enrichContractsWithAI(
     })),
     provider: "local-pattern-model",
   };
+}
+
+function requestKey(gemini: GeminiConfig, contracts: DetectedContract[]): string {
+  return `${gemini.model}\n${promptFor(contracts)}`;
 }
 
 /** Text models this key can use. Throws when Gemini rejects the key. */
@@ -76,7 +99,7 @@ Data:\n${JSON.stringify(
 async function callGemini(gemini: GeminiConfig, contracts: DetectedContract[]): Promise<DetectedContract[]> {
   const provider = `gemini:${gemini.model}`;
   const prompt = promptFor(contracts);
-  const request = `${gemini.model}\n${prompt}`;
+  const request = requestKey(gemini, contracts);
   if (lastAnswer?.request === request) return mergeAi(contracts, lastAnswer.text, provider);
 
   const res = await fetch(`${GEMINI_BASE}/models/${encodeURIComponent(gemini.model)}:generateContent`, {
