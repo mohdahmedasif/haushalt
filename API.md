@@ -41,7 +41,7 @@ Catalog: `GET /api/v1`
 | PATCH | `/categories/:id` | `{ "budget": 400 }` |
 | GET | `/transactions?month=&uncategorized=1&category=` | Ledger |
 | PATCH | `/transactions/:id` | `{ "categoryId", "splits", "loanPersonId", "loanDirection", "spreadMonths" }` |
-| POST | `/imports/preview` | `{ "fileName", "csvText" }` Sparkasse CAMT CSV |
+| POST | `/imports/preview` | `{ "fileName", "csvText" }` bank CSV (Sparkasse, Volksbank, DKB, ING) |
 | POST | `/imports` | `{ "fileName", "csvText", "includeSoft": false }` |
 | GET | `/imports` | Past import batches |
 | GET | `/cash` | `{ balance, movements }` |

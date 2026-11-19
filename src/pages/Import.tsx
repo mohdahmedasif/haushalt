@@ -71,7 +71,7 @@ export function ImportPage({
   return (
     <>
       <PageHeader title="Import">
-        Drop a Sparkasse Umsatz CSV. Exact duplicates and settled pending bookings are skipped; soft matches need your OK.
+        Drop a CSV export from Sparkasse, Volksbank, DKB or ING. Exact duplicates and settled pending bookings are skipped; soft matches need your OK.
       </PageHeader>
 
       {result && (

@@ -5,7 +5,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { accountFeeMonth, feeSpreadStart, learnRuleFrom, suggestCategory } from "../src/lib/categorize.ts";
 import { APP_NAME } from "../src/brand.ts";
 import { currentMonth, monthKey } from "../src/lib/dates.ts";
-import { parseSparkasseCsv } from "../src/lib/parseSparkasse.ts";
+import { parseBankCsv } from "../src/lib/parseSparkasse.ts";
 import { buildInsights } from "../src/lib/insights.ts";
 import { detectContracts } from "../src/lib/contracts.ts";
 import { defaultGeminiModel, enrichContractsWithAI, labelContractsFromCache, listGeminiModels } from "../src/lib/ai.ts";
@@ -1084,7 +1084,7 @@ function parseGoldInput(
 
 function previewImport(csvText: string): ImportPreviewRow[] {
   const settings = getSettings();
-  const rows = parseSparkasseCsv(csvText);
+  const rows = parseBankCsv(csvText);
   return rows.map((row) => {
     if (settings.skipZeroAmount && row.amount === 0) {
       return { row, status: "skip" as const, reason: "Zero-amount statement row" };

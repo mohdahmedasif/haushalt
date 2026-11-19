@@ -2,7 +2,7 @@
   "name": "haushalt",
   "private": true,
   "version": "0.1.0",
-  "description": "Local-first personal finance for German bank CSVs (Sparkasse CAMT / Umsatz)",
+  "description": "Local-first personal finance for German bank CSVs (Sparkasse, Volksbank, DKB, ING)",
   "license": "MIT",
   "repository": {
     "type": "git",
