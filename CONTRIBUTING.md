@@ -47,3 +47,5 @@ npm run dev
 ## License
 
 By contributing you agree your work is licensed under the [MIT License](./LICENSE).
+
+Please follow the [Code of Conduct](./CODE_OF_CONDUCT.md).
