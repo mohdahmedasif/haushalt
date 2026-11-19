@@ -1,0 +1,96 @@
+# Tests every push and pull request. A passing push to main builds a release:
+# the UI is compiled here, dependencies are installed here, and one tarball is
+# attached to a GitHub release. The server only downloads it.
+#
+# DISABLED: only runs when started by hand from the Actions tab. To enable it,
+# uncomment the push and pull_request triggers below.
+name: Test and build release
+
+on:
+  # push:
+  #   branches: [main]
+  # pull_request:
+  workflow_dispatch:
+
+# One run per branch; a newer push cancels the older run still going.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Type-check and build
+        run: npm run build
+
+  release:
+    needs: test
+    # Only main becomes a release; other branches stop after tests.
+    if: github.ref == 'refs/heads/main'
+    # Same OS and Node major as the server, so native modules match.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Assemble release
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # The server runs through tsx and imports shared code from src/,
+          # so the release keeps the full node_modules alongside dist/.
+          mkdir -p stage/haushalt
+          cp -a server src dist node_modules package.json stage/haushalt/
+          echo "$SHA" > stage/haushalt/BUILD
+          tar -czf haushalt.tar.gz -C stage haushalt
+          ls -lh haushalt.tar.gz
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          TAG="build-${SHA::7}"
+          gh release create "$TAG" haushalt.tar.gz \
+            --title "Build ${SHA::7}" \
+            --notes "Built from commit ${SHA}." \
+            --target "$SHA" \
+            --latest

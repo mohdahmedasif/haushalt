@@ -2,3 +2,13 @@ node_modules
 dist
 /data/
 .env
+
+# Personal data: never commit bank exports, databases, backups or keys
+*.sqlite
+*.sqlite-*
+*.db
+*.csv
+*.key
+*backup*.json
+.env.*
+!.env.example
