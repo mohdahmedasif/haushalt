@@ -35,7 +35,7 @@
   },
   "dependencies": {
     "@ant-design/icons": "^6.3.4",
-    "antd": "^6.6.5",
+    "antd": "^6.7.1",
     "cors": "^2.8.5",
     "dayjs": "^1.11.23",
     "express": "^5.1.0",
