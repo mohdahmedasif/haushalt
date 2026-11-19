@@ -16,16 +16,20 @@
   <a href="https://github.com/mohdahmedasif/haushalt/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22"><img src="https://img.shields.io/badge/good%20first%20issue-welcome-7057ff" alt="Good first issues"></a>
 </p>
 
-Drop in a Sparkasse CSV (CAMT or Umsatz) and Haushalt sorts every booking, tracks your budgets and tells you where the money went. No cloud account, no bank login: everything lives in SQLite on your own machine.
+Drop in a CSV from Sparkasse, Volksbank, DKB or ING and Haushalt sorts every booking, tracks your budgets and tells you where the money went. No cloud account, no bank login: everything lives in SQLite on your own machine.
 
 ## What it does
 
-- 📥 **Import** German bank CSVs, with duplicates caught automatically
+- 📥 **Import** CSVs from Sparkasse, Volksbank, DKB and ING, with duplicates caught automatically
 - 🏷️ **Auto-categorize** with rules that learn from your corrections
 - 📊 **Budgets and a year sheet** that show the month at a glance
 - 💶 **Cash wallet, lending and gold**, alongside your bank account
 - 🔁 **Contracts** spotted from recurring payments, optionally labeled by Gemini
 - 👨‍👩‍👧 **Profiles with PINs**, each with its own separate books
+
+<p align="center">
+  <img src="docs/screenshot.png" alt="Haushalt home screen with demo data" width="900">
+</p>
 
 ## Quick start
 

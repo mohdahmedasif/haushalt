@@ -39,7 +39,7 @@ npm run dev
 
 ## Useful places to contribute
 
-- Extra German bank CSV dialects (DKB, ING, Volksbank) in `src/lib/parseSparkasse.ts`
+- More German bank CSV formats in `src/lib/parseSparkasse.ts` (add an entry to `BANK_FORMATS` and a fake-data test)
 - Tests around CSV parsing and categorization
 - UI copy (German), empty states, accessibility
 - Docs and a sanitized product screenshot for the README
