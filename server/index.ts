@@ -525,7 +525,7 @@ app.post("/api/v1/rules/apply", (_req, res) => {
         suggestion.categoryId === "internal",
     });
     const updated = getTransaction(tx.id);
-    if (updated) syncWalletForBankTransfer(updated, tx.categoryId);
+    if (updated) syncWalletForBankTransfer(updated);
     const index = all.findIndex((row) => row.id === tx.id);
     if (index >= 0) {
       all[index] = normalizeReimburse({
@@ -595,8 +595,8 @@ app.patch("/api/v1/transactions/:id", (req, res) => {
   if (updated.source === "cash" && ("categoryId" in patch || "splits" in patch)) {
     syncCashMovementCategory(updated.id, updated.splits.length ? null : updated.categoryId);
   }
-  if (updated.source === "bank" && "categoryId" in patch) {
-    syncWalletForBankTransfer(updated, current.categoryId);
+  if (updated.source === "bank" && ("categoryId" in patch || "splits" in patch)) {
+    syncWalletForBankTransfer(updated);
   }
   if (
     updated.categoryId &&
@@ -1164,7 +1164,7 @@ function commitImport(fileName: string, preview: ImportPreviewRow[], includeSoft
       });
       insertTransaction(tx);
       ledger.push(tx);
-      syncWalletForBankTransfer(tx, null);
+      syncWalletForBankTransfer(tx);
     }
     for (const item of preview) {
       if (item.status !== "duplicate" || !item.existingId) continue;

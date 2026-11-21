@@ -9,6 +9,7 @@ import { SEED_RULES } from "../src/data/rules.ts";
 import { accountFeeMonth, feeSpreadStart, matchPerson, spreadMonthsForCategory } from "../src/lib/categorize.ts";
 import { normalizeGoldPieces, piecesFromLegacy, piecesSummary } from "../src/lib/gold.ts";
 import { normalizeReimburse } from "../src/lib/lending.ts";
+import { bankWalletMove } from "../src/lib/wallet.ts";
 import type {
   AccountState,
   AppSettings,
@@ -74,6 +75,7 @@ function ledgerFor(profileId: string): DatabaseSync {
       ensureSeedCategories();
       repairAccountFeeMonths();
       repairSpreads();
+      syncSplitWalletMoves();
     });
   }
   return ledger;
@@ -655,26 +657,35 @@ export function syncCashMovementCategory(transactionId: string, categoryId: stri
   db.prepare("UPDATE cash_movements SET category_id = ? WHERE transaction_id = ?").run(categoryId, transactionId);
 }
 
-/** Keep wallet in sync when a bank booking is tagged ATM / cash deposit (or untagged). */
-export function syncWalletForBankTransfer(tx: Transaction, previousCategoryId: string | null): void {
+/** Split bookings with an ATM or cash-deposit line used to skip the wallet; bring them in. */
+function syncSplitWalletMoves(): void {
+  for (const tx of listTransactions()) {
+    if (tx.source !== "bank" || !tx.splits.length) continue;
+    if (!tx.splits.some((line) => line.categoryId === "to_cash" || line.categoryId === "from_cash")) continue;
+    syncWalletForBankTransfer(tx);
+  }
+}
+
+/**
+ * Keep the wallet in sync with a bank booking tagged ATM / cash deposit — as its
+ * category or as split lines — and drop the wallet entry once it no longer is.
+ */
+export function syncWalletForBankTransfer(tx: Transaction): void {
   if (tx.source !== "bank") return;
 
   const linked = getCashMovementByTransaction(tx.id);
-  const wantsAtm = tx.categoryId === "to_cash" && tx.amount < 0;
-  const wantsDeposit = tx.categoryId === "from_cash" && tx.amount > 0;
+  const move = bankWalletMove(tx);
 
-  if (!wantsAtm && !wantsDeposit) {
-    if (
-      linked &&
-      ((previousCategoryId === "to_cash" && linked.type === "atm_in") ||
-        (previousCategoryId === "from_cash" && linked.type === "bank_out"))
-    ) {
+  if (!move) {
+    if (linked && (linked.type === "atm_in" || linked.type === "bank_out")) {
       db.prepare("DELETE FROM cash_movements WHERE id = ?").run(linked.id);
     }
     return;
   }
 
-  const amount = Math.abs(tx.amount);
+  const wantsAtm = move.type === "atm_in";
+  const wantsDeposit = !wantsAtm;
+  const amount = move.amount;
   const date = tx.valueDate || tx.bookingDate;
   const month = date.slice(0, 7);
   const type = wantsAtm ? "atm_in" : "bank_out";
