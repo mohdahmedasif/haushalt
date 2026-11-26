@@ -38,7 +38,7 @@
     "antd": "^6.7.1",
     "cors": "^2.8.5",
     "dayjs": "^1.11.23",
-    "express": "^5.1.0",
+    "express": "^5.3.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "react-router-dom": "^7.18.4",
